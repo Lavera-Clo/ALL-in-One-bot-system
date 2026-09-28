@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Training Portal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --primary: #8b5cf6;
+            --primary-hover: #7c3aed;
+            --accent: #10b981;
+            --danger: #ef4444;
+            --warn: #f59e0b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body {
+            background-color: var(--bg-dark);
+            background-image: radial-gradient(at 0% 0%, rgba(139,92,246,0.15) 0px, transparent 50%),
+                              radial-gradient(at 100% 100%, rgba(16,185,129,0.15) 0px, transparent 50%);
+            color: var(--text-main); min-height: 100vh;
+        }
+        .navbar {
+            display: flex; justify-content: space-between; align-items: center; padding: 1.1rem 2rem;
+            background: linear-gradient(135deg, rgba(75,85,99,0.45), rgba(55,65,81,0.55));
+            backdrop-filter: blur(16px); border-bottom: 1px solid rgba(255,255,255,0.12); flex-wrap: wrap; gap: 1rem;
+        }
+        .brand { display: flex; align-items: center; gap: 0.75rem; font-size: 1.2rem; font-weight: 700; }
+        .brand i { color: var(--primary); font-size: 1.4rem; }
+        .nav-links a { color: var(--text-muted); text-decoration: none; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 500; }
+        .nav-links a:hover, .nav-links a.active { color: white; background: rgba(139,92,246,0.2); }
+
+        .container { max-width: 1060px; margin: 2rem auto 4rem; padding: 0 1.25rem; }
+        .header h1 { font-size: 1.9rem; margin-bottom: 0.4rem; background: linear-gradient(to right, #a78bfa, #34d399); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .header p { color: var(--text-muted); margin-bottom: 1.5rem; }
+
+        .card { background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+            border-radius: 1rem; padding: 1.75rem; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.3); margin-bottom: 1.5rem; }
+        .card h2 { font-size: 1.15rem; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.6rem; }
+        .card h2 i { color: var(--primary); }
+        .card .hint { color: var(--text-muted); font-size: 0.88rem; margin-bottom: 1.25rem; line-height: 1.5; }
+
+        .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+        .tab { padding: 0.6rem 1.1rem; border-radius: 0.6rem; cursor: pointer; font-weight: 600; font-size: 0.92rem;
+            background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-muted); }
+        .tab.active { background: rgba(139,92,246,0.25); color: #fff; border-color: var(--primary); }
+        .panel { display: none; } .panel.active { display: block; }
+
+        label { display: block; margin-bottom: 0.4rem; font-weight: 600; font-size: 0.86rem; color: var(--text-muted); }
+        .form-control { width: 100%; padding: 0.75rem 0.9rem; background: rgba(15,23,42,0.6); border: 1px solid var(--card-border);
+            border-radius: 0.5rem; color: var(--text-main); font-size: 0.93rem; }
+        .form-control:focus { outline: none; border-color: var(--primary); }
+        textarea.form-control { min-height: 110px; resize: vertical; line-height: 1.5; }
+        .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+        .field { margin-bottom: 1rem; }
+
+        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.7rem 1.2rem;
+            border-radius: 0.5rem; font-size: 0.92rem; font-weight: 600; cursor: pointer; border: none; }
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-ghost { background: rgba(255,255,255,0.07); color: var(--text-main); border: 1px solid var(--card-border); }
+        .btn-ghost:hover { background: rgba(255,255,255,0.13); }
+        .btn-danger { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); }
+        .btn-danger:hover { background: rgba(239,68,68,0.28); }
+        .btn-sm { padding: 0.4rem 0.7rem; font-size: 0.8rem; }
+        .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+        .btn-full { width: 100%; }
+
+        .upload-area { border: 2px dashed rgba(139,92,246,0.5); border-radius: 0.75rem; padding: 2rem 1.5rem; text-align: center;
+            background: rgba(15,23,42,0.4); cursor: pointer; margin-bottom: 1.1rem; }
+        .upload-area:hover, .upload-area.dragover { background: rgba(139,92,246,0.1); border-color: var(--primary); }
+        .upload-area i { font-size: 2.2rem; color: var(--primary); margin-bottom: 0.7rem; }
+        .upload-area p { color: var(--text-muted); font-size: 0.87rem; }
+        #fileInput { display: none; }
+
+        .doc { border: 1px solid var(--card-border); border-radius: 0.75rem; padding: 1.1rem; margin-bottom: 0.9rem; background: rgba(15,23,42,0.45); }
+        .doc.inactive { opacity: 0.55; }
+        .doc-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+        .doc-title { font-weight: 700; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+        .doc-meta { color: var(--text-muted); font-size: 0.8rem; margin-top: 0.2rem; }
+        .doc-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+        .doc-body { margin-top: 0.9rem; display: none; }
+        .doc-body.open { display: block; }
+
+        .badge { font-size: 0.7rem; padding: 0.16rem 0.5rem; border-radius: 999px; font-weight: 700; letter-spacing: 0.02em; }
+        .badge-read { background: rgba(59,130,246,0.18); color: #93c5fd; }
+        .badge-send { background: rgba(245,158,11,0.18); color: #fcd34d; }
+        .badge-both { background: rgba(16,185,129,0.18); color: #6ee7b7; }
+        .badge-off  { background: rgba(148,163,184,0.18); color: #cbd5e1; }
+
+        .kb-preview { background: rgba(0,0,0,0.35); border-radius: 0.5rem; padding: 1.1rem; font-family: ui-monospace, monospace;
+            white-space: pre-wrap; font-size: 0.82rem; color: #cbd5e1; max-height: 460px; overflow-y: auto; line-height: 1.55; }
+
+        .toast { position: fixed; right: 1.25rem; bottom: 1.25rem; padding: 0.85rem 1.2rem; border-radius: 0.6rem;
+            font-weight: 600; font-size: 0.9rem; display: none; z-index: 50; max-width: 380px; }
+        .toast.ok { background: rgba(16,185,129,0.95); color: #04211a; }
+        .toast.err { background: rgba(239,68,68,0.95); color: #2a0505; }
+
+        .loader { display: none; margin: 1rem auto; width: 32px; height: 32px; border: 3px solid rgba(255,255,255,0.1);
+            border-left-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .empty { text-align: center; color: var(--text-muted); padding: 2rem 1rem; font-size: 0.92rem; }
+        .chat-line { padding: 0.8rem 1rem; border-radius: 0.7rem; margin-bottom: 0.7rem; white-space: pre-wrap; font-size: 0.92rem; line-height: 1.55; }
+        .chat-line.you { background: rgba(139,92,246,0.18); }
+        .chat-line.bot { background: rgba(16,185,129,0.12); }
+        .chat-attach { font-size: 0.8rem; color: var(--warn); margin-top: 0.4rem; }
+        .login-wrap { max-width: 380px; margin: 5rem auto; }
+        .stat-row { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+        .stat { background: rgba(15,23,42,0.5); border: 1px solid var(--card-border); border-radius: 0.6rem; padding: 0.7rem 1rem; }
+        .stat b { display: block; font-size: 1.25rem; }
+        .stat span { color: var(--text-muted); font-size: 0.78rem; }
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <div class="brand"><i class="fa-solid fa-brain"></i><span>Bot Training Portal</span></div>
+    <div class="nav-links">
+        <a href="/admin">Admin</a>
+        <a href="/orders">Orders</a>
+        <a href="/train" class="active">Train Bot</a>
+        <a href="/business-ideas">Ideas</a>
+        <a href="/docs">API Docs</a>
+        <a href="#" id="logoutLink" style="display:none">Log out</a>
+    </div>
+</nav>
+
+<!-- LOGIN -->
+<div class="container login-wrap" id="loginView" style="display:none">
+    <div class="card">
+        <h2><i class="fa-solid fa-lock"></i> Sign in</h2>
+        <p class="hint">Training changes what your bot tells customers, so it needs an admin login.</p>
+        <div class="field"><label>Username</label><input class="form-control" id="loginUser" autocomplete="username"></div>
+        <div class="field"><label>Password</label><input class="form-control" id="loginPass" type="password" autocomplete="current-password"></div>
+        <button class="btn btn-primary btn-full" id="loginBtn">Sign in</button>
+    </div>
+</div>
+
+<!-- PORTAL -->
+<div class="container" id="portalView" style="display:none">
+    <div class="header">
+        <h1>Train your WhatsApp bot</h1>
+        <p>Upload your menus, price lists and policies. Every upload is <b>added</b> to what the bot already knows — nothing you trained before is lost.</p>
+    </div>
+
+    <div class="field" style="max-width:420px">
+        <label>Business</label>
+        <select class="form-control" id="tenantSelect"></select>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-panel="docs"><i class="fa-regular fa-folder-open"></i> Documents</div>
+        <div class="tab" data-panel="profile"><i class="fa-regular fa-id-badge"></i> Bot profile</div>
+        <div class="tab" data-panel="kb"><i class="fa-solid fa-book"></i> Knowledge base</div>
+        <div class="tab" data-panel="test"><i class="fa-regular fa-comments"></i> Test the bot</div>
+    </div>
+
+    <!-- DOCUMENTS -->
+    <div class="panel active" id="panel-docs">
+        <div class="card">
+            <h2><i class="fa-solid fa-plus"></i> Add a document</h2>
+            <p class="hint">Upload a PDF, or paste text. The AI reads it, writes a summary for the bot, and suggests the words a customer might type to receive this file.</p>
+
+            <div class="upload-area" id="dropZone">
+                <i class="fa-regular fa-file-pdf"></i>
+                <h3 style="font-size:1rem;margin-bottom:0.35rem">Drop a PDF here, or click to browse</h3>
+                <p>PDF or .txt, up to 15 MB</p>
+                <div id="fileName" style="color:var(--accent);font-weight:600;margin-top:0.5rem"></div>
+            </div>
+            <input type="file" id="fileInput" accept=".pdf,.txt">
+
+            <div class="field">
+                <label>Or paste the details as text</label>
+                <textarea class="form-control" id="pasteText" placeholder="Opening hours, delivery areas, FAQs, anything the bot should know..."></textarea>
+            </div>
+
+            <div class="grid2">
+                <div>
+                    <label>Title (optional)</label>
+                    <input class="form-control" id="docTitle" placeholder="AI will name it if you leave this blank">
+                </div>
+                <div>
+                    <label>How should the bot use it?</label>
+                    <select class="form-control" id="docType">
+                        <option value="both">Answer from it AND send the PDF</option>
+                        <option value="knowledge">Answer from it only</option>
+                        <option value="sendable">Send the PDF only</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="loader" id="uploadLoader"></div>
+            <button class="btn btn-primary btn-full" id="uploadBtn"><i class="fa-solid fa-wand-magic-sparkles"></i> Add &amp; train</button>
+        </div>
+
+        <div class="card">
+            <h2><i class="fa-regular fa-folder-open"></i> What the bot knows</h2>
+            <p class="hint">Turn a document off to make the bot forget it for now, or delete it permanently. Either way the knowledge base is rebuilt from what is left.</p>
+            <div class="stat-row" id="docStats"></div>
+            <div id="docList"><div class="empty">Loading…</div></div>
+        </div>
+    </div>
+
+    <!-- BOT PROFILE -->
+    <div class="panel" id="panel-profile">
+        <div class="card">
+            <h2><i class="fa-regular fa-id-badge"></i> Who the bot is</h2>
+            <p class="hint">These details used to be written into the code, so every business shared them. Now each business has its own — change them here and the very next customer message uses the new values.</p>
+
+            <div class="grid2">
+                <div><label>Business name</label><input class="form-control" id="p_business_name"></div>
+                <div><label>Bot's name</label><input class="form-control" id="p_bot_name" placeholder="e.g. Nethmi"></div>
+                <div><label>Bot's job title</label><input class="form-control" id="p_bot_role_title" placeholder="e.g. Events Consultant"></div>
+                <div><label>Location</label><input class="form-control" id="p_business_location" placeholder="e.g. Bentota, Sri Lanka"></div>
+                <div><label>Currency</label><input class="form-control" id="p_currency" placeholder="e.g. LKR"></div>
+                <div><label>Personality style</label><select class="form-control" id="p_persona_template"></select></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2><i class="fa-solid fa-phone"></i> Who customers get passed to</h2>
+            <p class="hint">Leave a field empty and the bot simply never gives out that number — it will not fall back to anyone else's.</p>
+            <div class="grid2">
+                <div><label>Manager's WhatsApp number</label><input class="form-control" id="p_human_handoff_number" placeholder="+94771234567"></div>
+                <div><label>Hotline / front desk number</label><input class="form-control" id="p_front_office_number" placeholder="+94342275000"></div>
+            </div>
+            <div class="field">
+                <label>Hand over to a human when the customer asks about… (one per line)</label>
+                <textarea class="form-control" id="p_handoff_rules"></textarea>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2><i class="fa-solid fa-list-ul"></i> Quick-pick menu</h2>
+            <p class="hint">The tappable list WhatsApp shows when a customer asks to see the options. One per line as <code>Title | Description</code>. Leave it empty for no list.</p>
+            <div class="field">
+                <textarea class="form-control" id="p_quick_menu" placeholder="Grand Ballroom | 150-650 guests, air conditioned&#10;Garden Lawn | Outdoor lake view"></textarea>
+            </div>
+            <button class="btn btn-primary" id="saveProfileBtn"><i class="fa-solid fa-floppy-disk"></i> Save profile</button>
+        </div>
+    </div>
+
+    <!-- KNOWLEDGE BASE -->
+    <div class="panel" id="panel-kb">
+        <div class="card">
+            <h2><i class="fa-solid fa-book"></i> The bot's knowledge base</h2>
+            <p class="hint">Built automatically from your active documents. This exact text is what the bot reads before answering every customer.</p>
+            <button class="btn btn-ghost btn-sm" id="rebuildBtn" style="margin-bottom:1rem"><i class="fa-solid fa-rotate"></i> Rebuild from documents</button>
+            <div class="kb-preview" id="kbPreview"></div>
+        </div>
+    </div>
+
+    <!-- TEST -->
+    <div class="panel" id="panel-test">
+        <div class="card">
+            <h2><i class="fa-regular fa-comments"></i> Ask the bot a question</h2>
+            <p class="hint">Runs the real bot against this business's profile and documents. Nothing is sent to WhatsApp.</p>
+            <div class="field">
+                <input class="form-control" id="testMsg" placeholder="e.g. price list eka ewanna puluwanda?">
+            </div>
+            <button class="btn btn-primary" id="testBtn"><i class="fa-solid fa-paper-plane"></i> Send test message</button>
+            <div class="loader" id="testLoader"></div>
+            <div id="testOutput" style="margin-top:1.25rem"></div>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN_KEY = 'adminToken';
+let tenantId = null;
+let profileTemplates = [];
+
+const $ = (id) => document.getElementById(id);
+const getToken = () => "bypass-token";
+
+function toast(message, ok = true) {
+    const el = $('toast');
+    el.textContent = message;
+    el.className = 'toast ' + (ok ? 'ok' : 'err');
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function api(path, options = {}) {
+    const token = getToken();
+    const headers = Object.assign({}, options.headers || {}, token ? { Authorization: `Bearer ${token}` } : {});
+    const res = await fetch(path, Object.assign({}, options, { headers }));
+    if (res.status === 401) { showLogin(); throw new Error('Please sign in again.'); }
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    const data = isJson ? await res.json() : null;
+    if (!res.ok) throw new Error((data && data.detail) || `Request failed (${res.status})`);
+    return data;
+}
+
+function showLogin() {
+    $('loginView').style.display = 'block';
+    $('portalView').style.display = 'none';
+    $('logoutLink').style.display = 'none';
+}
+
+function showPortal() {
+    $('loginView').style.display = 'none';
+    $('portalView').style.display = 'block';
+    $('logoutLink').style.display = 'inline-block';
+}
+
+// ---------- auth ----------
+$('loginBtn').addEventListener('click', async () => {
+    const username = $('loginUser').value.trim();
+    const password = $('loginPass').value;
+    if (!username || !password) return toast('Enter your username and password.', false);
+    try {
+        const res = await fetch('/api/admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Login failed');
+        // Same keys the Admin and Orders pages use, so one login covers all of them.
+        sessionStorage.setItem(TOKEN_KEY, data.token);
+        sessionStorage.setItem('adminUsername', data.username || '');
+        sessionStorage.setItem('adminRole', data.role || '');
+        showPortal();
+        await boot();
+    } catch (err) { toast(err.message, false); }
+});
+$('loginPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+
+$('logoutLink').addEventListener('click', (e) => {
+    e.preventDefault();
+    ['adminToken', 'adminUsername', 'adminRole'].forEach((key) => {
+        sessionStorage.removeItem(key);
+        localStorage.removeItem(key);
+    });
+    showLogin();
+});
+
+// ---------- tabs ----------
+document.querySelectorAll('.tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+        tab.classList.add('active');
+        $('panel-' + tab.dataset.panel).classList.add('active');
+    });
+});
+
+// ---------- upload ----------
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+dropZone.addEventListener('click', () => fileInput.click());
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); }));
+['dragenter', 'dragover'].forEach((evt) =>
+    dropZone.addEventListener(evt, () => dropZone.classList.add('dragover')));
+['dragleave', 'drop'].forEach((evt) =>
+    dropZone.addEventListener(evt, () => dropZone.classList.remove('dragover')));
+dropZone.addEventListener('drop', (e) => {
+    if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; showFileName(); }
+});
+fileInput.addEventListener('change', showFileName);
+function showFileName() {
+    $('fileName').textContent = fileInput.files.length ? fileInput.files[0].name : '';
+}
+
+$('uploadBtn').addEventListener('click', async () => {
+    const text = $('pasteText').value.trim();
+    if (!fileInput.files.length && !text) return toast('Choose a PDF or paste some text first.', false);
+
+    const form = new FormData();
+    if (fileInput.files.length) form.append('file', fileInput.files[0]);
+    if (text) form.append('text', text);
+    if ($('docTitle').value.trim()) form.append('title', $('docTitle').value.trim());
+    form.append('doc_type', $('docType').value);
+
+    $('uploadBtn').disabled = true;
+    $('uploadLoader').style.display = 'block';
+    try {
+        const data = await api(`/api/tenants/${tenantId}/documents`, { method: 'POST', body: form });
+        toast(data.message);
+        fileInput.value = ''; showFileName();
+        $('pasteText').value = ''; $('docTitle').value = '';
+        await loadDocuments();
+    } catch (err) { toast(err.message, false); }
+    finally { $('uploadBtn').disabled = false; $('uploadLoader').style.display = 'none'; }
+});
+
+// ---------- documents ----------
+function typeBadge(doc) {
+    if (!doc.is_active) return '<span class="badge badge-off">OFF</span>';
+    if (doc.doc_type === 'knowledge') return '<span class="badge badge-read">READS</span>';
+    if (doc.doc_type === 'sendable') return '<span class="badge badge-send">SENDS</span>';
+    return '<span class="badge badge-both">READS + SENDS</span>';
+}
+
+function renderDocuments(documents) {
+    const list = $('docList');
+    if (!documents.length) {
+        list.innerHTML = '<div class="empty">No documents yet. Add your price list or menu above to train the bot.</div>';
+        return;
+    }
+    list.innerHTML = documents.map((doc) => `
+        <div class="doc ${doc.is_active ? '' : 'inactive'}">
+            <div class="doc-head">
+                <div>
+                    <div class="doc-title">${escapeHtml(doc.title)} ${typeBadge(doc)}</div>
+                    <div class="doc-meta">
+                        ${escapeHtml(doc.original_filename || 'pasted text')}
+                        · ${doc.char_count.toLocaleString()} characters
+                        ${doc.file_url ? `· <a href="${escapeHtml(doc.file_url)}" target="_blank" style="color:var(--accent)">open file</a>` : ''}
+                    </div>
+                </div>
+                <div class="doc-actions">
+                    <button class="btn btn-ghost btn-sm" data-act="toggleBody" data-id="${doc.id}"><i class="fa-solid fa-sliders"></i> Edit</button>
+                    <button class="btn btn-ghost btn-sm" data-act="toggleActive" data-id="${doc.id}" data-active="${doc.is_active}">
+                        ${doc.is_active ? '<i class="fa-regular fa-eye-slash"></i> Turn off' : '<i class="fa-regular fa-eye"></i> Turn on'}
+                    </button>
+                    <button class="btn btn-danger btn-sm" data-act="delete" data-id="${doc.id}" data-title="${escapeHtml(doc.title)}"><i class="fa-regular fa-trash-can"></i></button>
+                </div>
+            </div>
+            <div class="doc-body" id="body-${doc.id}">
+                <div class="field">
+                    <label>Send this file when a customer says any of these (comma separated)</label>
+                    <input class="form-control" id="kw-${doc.id}" value="${escapeHtml(doc.trigger_keywords)}">
+                </div>
+                <div class="field">
+                    <label>Caption shown when the file is sent</label>
+                    <input class="form-control" id="cap-${doc.id}" value="${escapeHtml(doc.caption || '')}">
+                </div>
+                <div class="field">
+                    <label>What the bot learned from this document (you can correct it)</label>
+                    <textarea class="form-control" id="sum-${doc.id}" style="min-height:190px">${escapeHtml(doc.summary)}</textarea>
+                </div>
+                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                    <button class="btn btn-primary btn-sm" data-act="save" data-id="${doc.id}"><i class="fa-solid fa-floppy-disk"></i> Save changes</button>
+                    ${doc.char_count ? `<button class="btn btn-ghost btn-sm" data-act="retrain" data-id="${doc.id}"><i class="fa-solid fa-rotate"></i> Re-read with AI</button>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+$('docList').addEventListener('click', async (e) => {
+    const button = e.target.closest('button[data-act]');
+    if (!button) return;
+    const id = button.dataset.id;
+    const act = button.dataset.act;
+
+    try {
+        if (act === 'toggleBody') {
+            $('body-' + id).classList.toggle('open');
+        } else if (act === 'toggleActive') {
+            await api(`/api/tenants/${tenantId}/documents/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_active: button.dataset.active !== 'true' })
+            });
+            toast('Updated.');
+            await loadDocuments();
+        } else if (act === 'save') {
+            await api(`/api/tenants/${tenantId}/documents/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    trigger_keywords: $('kw-' + id).value,
+                    caption: $('cap-' + id).value,
+                    summary: $('sum-' + id).value
+                })
+            });
+            toast('Saved. The bot uses this from the next message.');
+            await loadDocuments();
+        } else if (act === 'retrain') {
+            button.disabled = true;
+            await api(`/api/tenants/${tenantId}/documents/${id}/retrain`, { method: 'POST' });
+            toast('Re-read with AI.');
+            await loadDocuments();
+        } else if (act === 'delete') {
+            if (!confirm(`Delete "${button.dataset.title}"? The bot will forget it immediately.`)) return;
+            await api(`/api/tenants/${tenantId}/documents/${id}`, { method: 'DELETE' });
+            toast('Deleted.');
+            await loadDocuments();
+        }
+    } catch (err) { toast(err.message, false); }
+});
+
+async function loadDocuments() {
+    const data = await api(`/api/tenants/${tenantId}/documents`);
+    renderDocuments(data.documents);
+    const active = data.documents.filter((d) => d.is_active).length;
+    const sendable = data.documents.filter((d) => d.is_active && d.file_url && d.doc_type !== 'knowledge').length;
+    $('docStats').innerHTML = `
+        <div class="stat"><b>${data.documents.length}</b><span>documents</span></div>
+        <div class="stat"><b>${active}</b><span>active</span></div>
+        <div class="stat"><b>${sendable}</b><span>files the bot can send</span></div>
+        <div class="stat"><b>${data.knowledge_base_chars.toLocaleString()}</b><span>characters learned</span></div>`;
+    $('kbPreview').textContent = data.knowledge_base || '(empty)';
+}
+
+// ---------- profile ----------
+const PROFILE_FIELDS = ['business_name', 'bot_name', 'bot_role_title', 'business_location', 'currency',
+    'persona_template', 'human_handoff_number', 'front_office_number', 'handoff_rules', 'quick_menu'];
+
+async function loadProfile() {
+    const data = await api(`/api/tenants/${tenantId}/bot-profile`);
+    profileTemplates = data.available_templates || [];
+    $('p_persona_template').innerHTML = profileTemplates
+        .map((t) => `<option value="${t}">${t.charAt(0).toUpperCase() + t.slice(1)}</option>`).join('');
+    PROFILE_FIELDS.forEach((field) => { $('p_' + field).value = data[field] ?? ''; });
+}
+
+$('saveProfileBtn').addEventListener('click', async () => {
+    const payload = {};
+    PROFILE_FIELDS.forEach((field) => { payload[field] = $('p_' + field).value; });
+    try {
+        await api(`/api/tenants/${tenantId}/bot-profile`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        toast('Bot profile saved.');
+        await loadTenants(tenantId);
+    } catch (err) { toast(err.message, false); }
+});
+
+// ---------- knowledge base ----------
+$('rebuildBtn').addEventListener('click', async () => {
+    try {
+        const data = await api(`/api/tenants/${tenantId}/documents/rebuild`, { method: 'POST' });
+        $('kbPreview').textContent = data.knowledge_base;
+        toast('Knowledge base rebuilt.');
+    } catch (err) { toast(err.message, false); }
+});
+
+// ---------- test ----------
+$('testBtn').addEventListener('click', async () => {
+    const message = $('testMsg').value.trim();
+    if (!message) return toast('Type a question first.', false);
+    $('testBtn').disabled = true;
+    $('testLoader').style.display = 'block';
+    try {
+        const data = await api(`/api/tenants/${tenantId}/preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message })
+        });
+        const attachments = (data.attachments || [])
+            .map((a) => `📎 would send: ${escapeHtml(a.filename)}`).join('<br>');
+        $('testOutput').innerHTML = `
+            <div class="chat-line you"><b>Customer:</b> ${escapeHtml(message)}</div>
+            <div class="chat-line bot"><b>Bot:</b> ${escapeHtml(data.reply)}
+                ${attachments ? `<div class="chat-attach">${attachments}</div>` : ''}
+                ${data.handoff ? '<div class="chat-attach">👤 would hand this customer to a human</div>' : ''}
+            </div>` + $('testOutput').innerHTML;
+        $('testMsg').value = '';
+    } catch (err) { toast(err.message, false); }
+    finally { $('testBtn').disabled = false; $('testLoader').style.display = 'none'; }
+});
+$('testMsg').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('testBtn').click(); });
+
+// ---------- boot ----------
+async function loadTenants(keepId) {
+    const tenants = await api('/api/tenants');
+    const select = $('tenantSelect');
+    select.innerHTML = tenants
+        .map((t) => `<option value="${t.id}">${escapeHtml(t.business_name)}</option>`).join('');
+    tenantId = keepId || (tenants[0] && tenants[0].id);
+    if (tenantId) select.value = tenantId;
+    return tenants;
+}
+
+$('tenantSelect').addEventListener('change', async (e) => {
+    tenantId = Number(e.target.value);
+    await refresh();
+});
+
+async function refresh() {
+    if (!tenantId) return;
+    await Promise.all([loadDocuments(), loadProfile()]);
+}
+
+async function boot() {
+    try {
+        const tenants = await loadTenants();
+        if (!tenants.length) {
+            $('docList').innerHTML = '<div class="empty">No business is set up yet. Create one in the Admin dashboard first.</div>';
+            return;
+        }
+        await refresh();
+    } catch (err) {
+        if (err.message !== 'Please sign in again.') toast(err.message, false);
+    }
+}
+
+(async () => {
+    // LOGIN PORTAL REMOVED: Auto bypass
+    showPortal();
+    await boot();
+})();
+</script>
+</body>
+</html>

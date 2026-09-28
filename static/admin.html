@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wasala Nature Resort - Admin Control Center</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --accent: #10b981;
+            --gold: #f59e0b;
+            --silver: #94a3b8;
+            --premier: #ec4899;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --danger: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+
+        body {
+            background-color: var(--bg-dark);
+            background-image:
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.15) 0px, transparent 50%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ===== LOGIN OVERLAY ===== */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--bg-dark);
+            background-image:
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.2) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.2) 0px, transparent 50%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            padding: 1rem;
+        }
+
+        .login-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid var(--card-border);
+            border-radius: 1.25rem;
+            padding: 2.5rem 2rem;
+            max-width: 420px;
+            width: 100%;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.6);
+        }
+
+        .login-brand {
+            text-align: center;
+            margin-bottom: 1.75rem;
+        }
+
+        .login-brand i {
+            font-size: 3rem;
+            color: var(--primary);
+            margin-bottom: 0.75rem;
+            display: block;
+        }
+
+        .login-brand h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.3rem;
+        }
+
+        .login-brand p {
+            color: var(--text-muted);
+            font-size: 0.88rem;
+        }
+
+        .login-label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.4rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .login-error {
+            color: var(--danger);
+            font-size: 0.83rem;
+            margin-top: 0.75rem;
+            display: none;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            text-align: center;
+        }
+
+        /* ===== NAVBAR ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            background: linear-gradient(135deg, rgba(75, 85, 99, 0.45), rgba(55, 65, 81, 0.55));
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            gap: 0.75rem;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-weight: 700;
+            color: #fff;
+            min-width: 0;
+        }
+
+        .brand i {
+            color: var(--primary);
+            font-size: 1.35rem;
+            flex-shrink: 0;
+        }
+
+        .brand-full { display: inline; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .brand-short { display: none; font-size: 1rem; }
+
+        .nav-links { display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; }
+        .nav-links a {
+            color: var(--text-muted); text-decoration: none; padding: 0.45rem 0.85rem;
+            border-radius: 0.5rem; font-weight: 500; font-size: 0.88rem; white-space: nowrap;
+        }
+        .nav-links a:hover, .nav-links a.active { color: #fff; background: rgba(139, 92, 246, 0.2); }
+
+        .navbar-right {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex-shrink: 0;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent);
+            padding: 0.35rem 0.7rem;
+            border-radius: 9999px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            white-space: nowrap;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            background-color: var(--accent);
+            border-radius: 50%;
+            box-shadow: 0 0 7px var(--accent);
+            flex-shrink: 0;
+        }
+
+        .status-text { }
+
+        .btn-logout {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            background: rgba(239, 68, 68, 0.12);
+            color: var(--danger);
+            border: 1px solid rgba(239, 68, 68, 0.28);
+            padding: 0.35rem 0.7rem;
+            border-radius: 9999px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.2s;
+        }
+
+        .btn-logout:hover { background: rgba(239, 68, 68, 0.22); }
+
+        /* ===== CONTAINER ===== */
+        .container {
+            max-width: 1300px;
+            margin: 2rem auto;
+            padding: 0 1.25rem;
+            flex: 1;
+            width: 100%;
+        }
+
+        .header-title { margin-bottom: 1.5rem; }
+
+        .header-title h1 {
+            font-size: clamp(1.2rem, 3vw, 1.75rem);
+            font-weight: 700;
+            margin-bottom: 0.4rem;
+        }
+
+        .header-title p { color: var(--text-muted); font-size: 0.88rem; }
+
+        /* ===== CARDS ===== */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+            margin-bottom: 1.5rem;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            margin-bottom: 1.25rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        .card-header i { color: var(--primary); font-size: 1.1rem; }
+        .card-header h2 { font-size: 1rem; font-weight: 600; }
+
+        /* ===== TABLE ===== */
+        .table-responsive {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            border-radius: 0.5rem;
+            border: 1px solid var(--card-border);
+        }
+
+        table.pricing-table {
+            width: 100%;
+            min-width: 680px;
+            border-collapse: collapse;
+            font-size: 0.83rem;
+        }
+
+        table.pricing-table th,
+        table.pricing-table td {
+            padding: 0.7rem 0.55rem;
+            text-align: center;
+            border: 1px solid var(--card-border);
+        }
+
+        table.pricing-table th {
+            background: rgba(15, 23, 42, 0.95);
+            color: var(--text-main);
+            font-weight: 600;
+            font-size: 0.78rem;
+        }
+
+        table.pricing-table tr.silver-row { background: rgba(148, 163, 184, 0.05); }
+        table.pricing-table tr.gold-row   { background: rgba(245, 158, 11, 0.05); }
+        table.pricing-table tr.premier-row { background: rgba(236, 72, 153, 0.05); }
+
+        .menu-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            font-weight: 700;
+            padding: 0.22rem 0.5rem;
+            border-radius: 0.35rem;
+            font-size: 0.78rem;
+            white-space: nowrap;
+        }
+
+        .silver-badge { background: rgba(148, 163, 184, 0.2); color: var(--silver); }
+        .gold-badge   { background: rgba(245, 158, 11, 0.2);  color: var(--gold); }
+        .premier-badge { background: rgba(236, 72, 153, 0.2); color: var(--premier); }
+
+        .table-input {
+            width: 100%;
+            min-width: 85px;
+            padding: 0.38rem 0.3rem;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid var(--card-border);
+            border-radius: 0.35rem;
+            color: var(--text-main);
+            font-size: 0.78rem;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .table-input:focus { outline: none; border-color: var(--primary); }
+
+        /* ===== FORM ===== */
+        .form-group { margin-bottom: 1.1rem; }
+
+        .form-group label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.4rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 0.7rem 0.9rem;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--card-border);
+            border-radius: 0.5rem;
+            color: var(--text-main);
+            font-size: 0.93rem;
+            transition: all 0.2s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+        }
+
+        textarea.form-control {
+            min-height: 320px;
+            font-family: monospace;
+            line-height: 1.5;
+            resize: vertical;
+            font-size: 0.8rem;
+        }
+
+        /* ===== GRID ===== */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.25rem;
+            margin-bottom: 1rem;
+        }
+
+        /* ===== BUTTONS ===== */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.8rem 1.75rem;
+            border-radius: 0.6rem;
+            font-size: 0.93rem;
+            font-weight: 700;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-block { width: 100%; justify-content: center; }
+
+        .btn-primary {
+            background-color: var(--primary);
+            color: white;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: rgba(30, 41, 59, 0.9);
+            color: var(--text-main);
+            border: 1px solid var(--card-border);
+        }
+
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.1); }
+
+        .btn-container {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            padding: 1rem 1.5rem;
+            background: rgba(10, 15, 30, 0.7);
+            backdrop-filter: blur(12px);
+            border-top: 1px solid var(--card-border);
+            border-radius: 0 0 1rem 1rem;
+            margin: 1.25rem -1.5rem -1.5rem;
+            position: sticky;
+            bottom: 0;
+            z-index: 90;
+        }
+
+        /* ===== TOAST ===== */
+        .toast {
+            position: fixed;
+            bottom: 5rem;
+            right: 1rem;
+            left: 1rem;
+            max-width: 420px;
+            margin: 0 auto;
+            background: rgba(30, 41, 59, 0.96);
+            border: 1px solid var(--accent);
+            color: white;
+            padding: 0.85rem 1.25rem;
+            border-radius: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            transform: translateY(150%);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 1000;
+        }
+
+        .toast.show { transform: translateY(0); }
+        .toast i { color: var(--accent); font-size: 1.1rem; flex-shrink: 0; }
+
+        /* ===== MOBILE ===== */
+        @media (max-width: 768px) {
+            .brand-full { display: none; }
+            .brand-short { display: inline; }
+            .status-text { display: none; }
+
+            .container { margin: 1rem auto; padding: 0 0.75rem; }
+            .card { padding: 1.1rem; }
+
+            .grid-2 { grid-template-columns: 1fr; gap: 0; }
+
+            .btn-container {
+                flex-direction: column;
+                gap: 0.5rem;
+                margin: 1rem -1.1rem -1.1rem;
+                padding: 0.9rem 1rem;
+            }
+
+            .btn-container .btn { width: 100%; justify-content: center; }
+
+            .toast { bottom: 1rem; }
+        }
+
+        @media (max-width: 960px) and (min-width: 769px) {
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ===== LOGIN OVERLAY ===== -->
+    <div id="loginOverlay" class="login-overlay">
+        <div class="login-card">
+            <div class="login-brand">
+                <i class="fa-solid fa-hotel"></i>
+                <h2>Admin Portal</h2>
+                <p>Wasala Nature Resort &mdash; Control Center</p>
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label class="login-label">Username</label>
+                <input type="text" id="loginUsername" class="form-control"
+                    placeholder="Your username" autocomplete="username"
+                    onkeydown="if(event.key==='Enter') document.getElementById('loginPassword').focus()">
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label class="login-label">Password</label>
+                <input type="password" id="loginPassword" class="form-control"
+                    placeholder="Enter your password" autocomplete="current-password"
+                    onkeydown="if(event.key==='Enter') login()">
+            </div>
+            <button class="btn btn-primary btn-block" onclick="login()">
+                <i class="fa-solid fa-right-to-bracket"></i> Sign In
+            </button>
+            <div id="loginError" class="login-error">
+                <i class="fa-solid fa-circle-exclamation"></i> Incorrect username or password.
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== NAVBAR ===== -->
+    <nav class="navbar">
+        <div class="brand">
+            <i class="fa-solid fa-gauge-high"></i>
+            <span class="brand-full">Admin Dashboard</span>
+            <span class="brand-short">Admin</span>
+        </div>
+        <div class="navbar-right">
+            <div class="nav-links">
+                <a href="/admin" class="active">Admin</a>
+                <a href="/orders">Orders</a>
+                <a href="/train">Train Bot</a>
+                <a href="/business-ideas">Ideas</a>
+                <a href="/docs">API Docs</a>
+            </div>
+            <div class="status-badge">
+                <div class="status-dot"></div>
+                <span class="status-text" id="loggedInAs">AI Bot Active</span>
+            </div>
+            <button class="btn-logout" onclick="logout()">
+                <i class="fa-solid fa-right-from-bracket"></i>
+                <span>Logout</span>
+            </button>
+        </div>
+    </nav>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <div class="container">
+        <div class="header-title">
+            <h1>Banquet Package &amp; Knowledge Base Manager</h1>
+            <p>Customize Silver, Gold, and Premier package rates and AI knowledge base for your WhatsApp bot.</p>
+        </div>
+
+        <!-- 1. Pricing Matrix -->
+        <div class="card">
+            <div class="card-header">
+                <i class="fa-solid fa-table-cells"></i>
+                <h2>1. Official Banquet Package Rates Matrix (Total LKR)</h2>
+            </div>
+            <div class="table-responsive">
+                <table class="pricing-table">
+                    <thead>
+                        <tr>
+                            <th rowspan="2" style="width:110px;">Menu</th>
+                            <th colspan="2">100 Pax</th>
+                            <th colspan="2">150 Pax</th>
+                            <th rowspan="2">200 Pax</th>
+                            <th rowspan="2">250 Pax</th>
+                            <th rowspan="2">300 Pax</th>
+                        </tr>
+                        <tr>
+                            <th>Grand</th>
+                            <th>Starlight</th>
+                            <th>Grand</th>
+                            <th>Starlight</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="silver-row">
+                            <td><span class="menu-badge silver-badge"><i class="fa-solid fa-gem"></i> Silver</span></td>
+                            <td><input type="text" id="silver_100_grand" class="table-input" value="Rs.539,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_100_star"  class="table-input" value="Rs.479,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_150_grand" class="table-input" value="Rs.708,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_150_star"  class="table-input" value="Rs.678,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_200"       class="table-input" value="Rs.876,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_250"       class="table-input" value="Rs.1,075,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="silver_300"       class="table-input" value="Rs.1,273,500" onchange="autoGenerateKnowledgeBase()"></td>
+                        </tr>
+                        <tr class="gold-row">
+                            <td><span class="menu-badge gold-badge"><i class="fa-solid fa-crown"></i> Gold</span></td>
+                            <td><input type="text" id="gold_100_grand" class="table-input" value="Rs.589,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_100_star"  class="table-input" value="Rs.529,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_150_grand" class="table-input" value="Rs.783,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_150_star"  class="table-input" value="Rs.753,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_200"       class="table-input" value="Rs.976,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_250"       class="table-input" value="Rs.1,200,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="gold_300"       class="table-input" value="Rs.1,423,500" onchange="autoGenerateKnowledgeBase()"></td>
+                        </tr>
+                        <tr class="premier-row">
+                            <td><span class="menu-badge premier-badge"><i class="fa-solid fa-star"></i> Premier</span></td>
+                            <td><input type="text" id="premier_100_grand" class="table-input" value="Rs.709,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_100_star"  class="table-input" value="Rs.649,000" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_150_grand" class="table-input" value="Rs.917,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_150_star"  class="table-input" value="Rs.887,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_200"       class="table-input" value="Rs.1,143,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_250"       class="table-input" value="Rs.1,397,500" onchange="autoGenerateKnowledgeBase()"></td>
+                            <td><input type="text" id="premier_300"       class="table-input" value="Rs.1,647,500" onchange="autoGenerateKnowledgeBase()"></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 2. Extra Plate & Per-Head Rates -->
+        <div class="grid-2">
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-utensils"></i>
+                    <h2>Extra Plate Rates (Per Extra Guest)</h2>
+                </div>
+                <div class="form-group">
+                    <label>Silver Package Extra Plate</label>
+                    <input type="text" id="extra_silver" class="form-control" value="Rs. 4,170.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+                <div class="form-group">
+                    <label>Gold Package Extra Plate</label>
+                    <input type="text" id="extra_gold" class="form-control" value="Rs. 4,770.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+                <div class="form-group">
+                    <label>Premier Menu Extra Plate</label>
+                    <input type="text" id="extra_premier" class="form-control" value="Rs. 5,370.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-users"></i>
+                    <h2>Hall Per-Head Rates (LKR / Person)</h2>
+                </div>
+                <div class="form-group">
+                    <label>Starlight Ballroom Rates</label>
+                    <input type="text" id="perhead_starlight" class="form-control" value="Silver: Rs. 3,395.00 | Gold: Rs. 3,895.00 | Premier: Rs. 4,795.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+                <div class="form-group">
+                    <label>Grand Ballroom Rates (150-200 Pax)</label>
+                    <input type="text" id="perhead_grand_150_200" class="form-control" value="Silver: Rs. 3,595.00 | Gold: Rs. 4,095.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+                <div class="form-group">
+                    <label>More Than 200 Pax Rates (All Halls)</label>
+                    <input type="text" id="perhead_200_plus" class="form-control" value="Silver: Rs. 3,395.00 | Gold: Rs. 3,895.00" onchange="autoGenerateKnowledgeBase()">
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. WhatsApp API Credentials -->
+        <div class="card">
+            <div class="card-header">
+                <i class="fa-brands fa-whatsapp"></i>
+                <h2>WhatsApp Business API Credentials</h2>
+            </div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>WhatsApp Phone Number ID</label>
+                    <input type="text" id="phoneNumberId" class="form-control" placeholder="e.g. 109876543210987">
+                </div>
+                <div class="form-group">
+                    <label>Meta Access Token</label>
+                    <input type="password" id="metaAccessToken" class="form-control" placeholder="EAA...">
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. AI Knowledge Base -->
+        <div class="card">
+            <div class="card-header">
+                <i class="fa-solid fa-brain"></i>
+                <h2>AI Bot Master Training Knowledge Base (Auto-Generated)</h2>
+            </div>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>Bot / Business Name</label>
+                    <input type="text" id="businessName" class="form-control" value="Wasala Nature Resort - Banquet &amp; Events">
+                </div>
+                <div class="form-group">
+                    <label>WhatsApp Manager Number (Handoff)</label>
+                    <input type="text" id="handoffNumber" class="form-control" value="+94779998877" placeholder="+94 77 999 8877">
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>Front Office / Hotline Number</label>
+                    <input type="text" id="frontOfficeNumber" class="form-control" value="+94342275000" placeholder="+94 34 227 5000">
+                </div>
+                <div class="form-group" style="display:flex; align-items:flex-end; padding-bottom:0.25rem;">
+                    <p style="color:var(--text-muted); font-size:0.82rem; line-height:1.5;">
+                        <i class="fa-solid fa-circle-info" style="color:var(--primary);"></i>
+                        Both numbers are shared with customers when they ask to speak to someone or when the bot can't answer.
+                    </p>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>AI System Instructions / Persona Prompt</label>
+                <input type="text" id="systemPrompt" class="form-control"
+                    value="You are the senior Banquet &amp; Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices.">
+            </div>
+
+            <div class="form-group" style="margin-bottom:0;">
+                <label>Full Training Memory Text (Used by AI Bot to Answer Guests)</label>
+                <textarea id="knowledgeBase" class="form-control"></textarea>
+            </div>
+
+            <!-- Sticky Save Buttons -->
+            <div class="btn-container">
+                <button class="btn btn-secondary" onclick="loadTenantData()">
+                    <i class="fa-solid fa-arrows-rotate"></i> Reload Current
+                </button>
+                <button class="btn btn-primary" onclick="saveTenantData()">
+                    <i class="fa-solid fa-cloud-arrow-up"></i> Save &amp; Sync to Live Bot
+                </button>
+            </div>
+        </div>
+
+        <!-- 5. Staff Accounts (owner only) -->
+        <div class="card" id="staffCard" style="display:none;">
+            <div class="card-header">
+                <i class="fa-solid fa-users-gear"></i>
+                <h2>Staff Accounts</h2>
+            </div>
+            <div class="table-responsive" style="margin-bottom:1.25rem;">
+                <table class="pricing-table" style="min-width:0;">
+                    <thead>
+                        <tr>
+                            <th style="text-align:left;">Username</th>
+                            <th>Role</th>
+                            <th>Status</th>
+                            <th>Last Login</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="staffBody"></tbody>
+                </table>
+            </div>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>New Username</label>
+                    <input type="text" id="newStaffUsername" class="form-control" placeholder="jane">
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="newStaffPassword" class="form-control" placeholder="At least 6 characters">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Role</label>
+                <select id="newStaffRole" class="form-control">
+                    <option value="staff">Staff (can manage bot &amp; orders)</option>
+                    <option value="owner">Owner (full access incl. staff accounts)</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" onclick="createStaffAccount()">
+                <i class="fa-solid fa-user-plus"></i> Add Staff Account
+            </button>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast">
+        <i class="fa-solid fa-circle-check"></i>
+        <span id="toastMsg">Changes saved!</span>
+    </div>
+
+    <script>
+        const API_URL = '/api/tenants/1';
+
+        // ===== AUTH =====
+        function getToken() { return "bypass-token"; }
+        function getRole() { return "owner"; }
+
+        async function authFetch(url, options = {}) {
+            const token = getToken();
+            const headers = Object.assign({}, options.headers || {}, token ? { 'Authorization': `Bearer ${token}` } : {});
+            const res = await fetch(url, Object.assign({}, options, { headers }));
+            if (res.status === 401) {
+                showLoginOverlay('Your session expired. Please sign in again.');
+                throw new Error('Unauthorized');
+            }
+            return res;
+        }
+
+        async function login() {
+            const username = document.getElementById('loginUsername').value.trim();
+            const password = document.getElementById('loginPassword').value.trim();
+            const errEl = document.getElementById('loginError');
+            errEl.style.display = 'none';
+            if (!username || !password) return;
+
+            try {
+                const res = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    sessionStorage.setItem('adminToken', data.token);
+                    sessionStorage.setItem('adminUsername', data.username);
+                    sessionStorage.setItem('adminRole', data.role);
+                    document.getElementById('loginOverlay').style.display = 'none';
+                    afterLogin();
+                } else {
+                    errEl.style.display = 'block';
+                    document.getElementById('loginPassword').value = '';
+                    document.getElementById('loginPassword').focus();
+                }
+            } catch {
+                errEl.style.display = 'block';
+            }
+        }
+
+        function afterLogin() {
+            document.getElementById('loggedInAs').textContent = `${sessionStorage.getItem('adminUsername')} (${getRole()})`;
+            document.getElementById('staffCard').style.display = getRole() === 'owner' ? 'block' : 'none';
+            loadTenantData();
+            if (getRole() === 'owner') loadStaffAccounts();
+        }
+
+        function showLoginOverlay(message) {
+            sessionStorage.removeItem('adminToken');
+            document.getElementById('loginOverlay').style.display = 'flex';
+            if (message) {
+                const errEl = document.getElementById('loginError');
+                errEl.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> ${message}`;
+                errEl.style.display = 'block';
+            }
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('loginUsername').focus();
+        }
+
+        async function logout() {
+            try { await authFetch('/api/admin/logout', { method: 'POST' }); } catch {}
+            sessionStorage.clear();
+            document.getElementById('loginOverlay').style.display = 'flex';
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('loginUsername').focus();
+        }
+
+        // ===== STAFF ACCOUNTS (owner only) =====
+        async function loadStaffAccounts() {
+            try {
+                const res = await authFetch('/api/admin/users');
+                if (!res.ok) return;
+                const users = await res.json();
+                const me = sessionStorage.getItem('adminUsername');
+                document.getElementById('staffBody').innerHTML = users.map(u => `
+                    <tr>
+                        <td style="text-align:left;">${u.username}${u.username === me ? ' <span style="color:var(--text-muted);font-size:0.75rem;">(you)</span>' : ''}</td>
+                        <td><span class="menu-badge ${u.role === 'owner' ? 'gold-badge' : 'silver-badge'}">${u.role}</span></td>
+                        <td>${u.is_active ? '<span style="color:var(--accent);">Active</span>' : '<span style="color:var(--danger);">Disabled</span>'}</td>
+                        <td style="font-size:0.75rem;color:var(--text-muted);">${u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never'}</td>
+                        <td>
+                            <button class="btn btn-secondary" style="padding:0.35rem 0.7rem;font-size:0.78rem;" onclick="toggleStaffActive(${u.id}, ${!u.is_active})">${u.is_active ? 'Disable' : 'Enable'}</button>
+                            ${u.username !== me ? `<button class="btn" style="padding:0.35rem 0.7rem;font-size:0.78rem;background:rgba(239,68,68,0.15);color:var(--danger);" onclick="deleteStaffAccount(${u.id}, '${u.username}')"><i class="fa-solid fa-trash"></i></button>` : ''}
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (err) { console.error('Failed to load staff accounts:', err); }
+        }
+
+        async function createStaffAccount() {
+            const username = document.getElementById('newStaffUsername').value.trim();
+            const password = document.getElementById('newStaffPassword').value;
+            const role = document.getElementById('newStaffRole').value;
+            if (!username || password.length < 6) {
+                showToast('❌ Username required and password must be 6+ characters');
+                return;
+            }
+            try {
+                const res = await authFetch('/api/admin/users', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, role })
+                });
+                if (res.ok) {
+                    showToast(`✅ Account "${username}" created`);
+                    document.getElementById('newStaffUsername').value = '';
+                    document.getElementById('newStaffPassword').value = '';
+                    loadStaffAccounts();
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast('❌ ' + (err.detail || 'Failed to create account'));
+                }
+            } catch (err) { showToast('❌ Error creating account'); }
+        }
+
+        async function toggleStaffActive(id, activate) {
+            try {
+                const res = await authFetch(`/api/admin/users/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_active: activate })
+                });
+                if (res.ok) { showToast(activate ? 'Account enabled' : 'Account disabled'); loadStaffAccounts(); }
+                else { const err = await res.json().catch(() => ({})); showToast('❌ ' + (err.detail || 'Failed to update')); }
+            } catch { showToast('❌ Error updating account'); }
+        }
+
+        async function deleteStaffAccount(id, username) {
+            if (!confirm(`Delete staff account "${username}"? This cannot be undone.`)) return;
+            try {
+                const res = await authFetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+                if (res.ok) { showToast('Account deleted'); loadStaffAccounts(); }
+                else { const err = await res.json().catch(() => ({})); showToast('❌ ' + (err.detail || 'Failed to delete')); }
+            } catch { showToast('❌ Error deleting account'); }
+        }
+
+        // ===== KNOWLEDGE BASE AUTO-GENERATE =====
+        function autoGenerateKnowledgeBase() {
+            const v = id => document.getElementById(id).value;
+            const kb = `=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
+
+🏛️ BANQUET HALLS AVAILABLE:
+1. Grand Ballroom (Capacity 150-650 guests)
+2. Starlight Ballroom (Capacity 100-350 guests)
+
+📊 OFFICIAL BANQUET PACKAGE PRICING MATRIX:
+
+SILVER MENU PACKAGES:
+- 100 Pax (Grand Ballroom): ${v('silver_100_grand')}
+- 100 Pax (Starlight Ballroom): ${v('silver_100_star')}
+- 150 Pax (Grand Ballroom): ${v('silver_150_grand')}
+- 150 Pax (Starlight Ballroom): ${v('silver_150_star')}
+- 200 Pax: ${v('silver_200')}
+- 250 Pax: ${v('silver_250')}
+- 300 Pax: ${v('silver_300')}
+
+GOLD MENU PACKAGES:
+- 100 Pax (Grand Ballroom): ${v('gold_100_grand')}
+- 100 Pax (Starlight Ballroom): ${v('gold_100_star')}
+- 150 Pax (Grand Ballroom): ${v('gold_150_grand')}
+- 150 Pax (Starlight Ballroom): ${v('gold_150_star')}
+- 200 Pax: ${v('gold_200')}
+- 250 Pax: ${v('gold_250')}
+- 300 Pax: ${v('gold_300')}
+
+PREMIER MENU PACKAGES:
+- 100 Pax (Grand Ballroom): ${v('premier_100_grand')}
+- 100 Pax (Starlight Ballroom): ${v('premier_100_star')}
+- 150 Pax (Grand Ballroom): ${v('premier_150_grand')}
+- 150 Pax (Starlight Ballroom): ${v('premier_150_star')}
+- 200 Pax: ${v('premier_200')}
+- 250 Pax: ${v('premier_250')}
+- 300 Pax: ${v('premier_300')}
+
+🍽️ EXTRA PLATE RATES (PER EXTRA GUEST):
+- Silver Package Extra Plate: ${v('extra_silver')}
+- Gold Package Extra Plate: ${v('extra_gold')}
+- Premier Menu Extra Plate: ${v('extra_premier')}
+
+👥 PER-HEAD BREAKDOWN RATES:
+- Starlight Ballroom: ${v('perhead_starlight')}
+- Grand Ballroom (150Pax - 200Pax): ${v('perhead_grand_150_200')}
+- More Than 200Pax (All Halls): ${v('perhead_200_plus')}
+
+📄 OFFICIAL BROCHURE PDF:
+- 2026 Wedding & Banquet Package Brochure: https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf
+
+📋 POLICIES:
+- Advance Booking Deposit: 25% to hold date.
+- Free Corkage for hard liquor if soft drinks purchased from hotel.
+- Music Cut-off Time: 11:30 PM.`;
+            document.getElementById('knowledgeBase').value = kb;
+        }
+
+        // ===== LOAD TENANT DATA =====
+        async function loadTenantData() {
+            try {
+                const res = await authFetch(API_URL);
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('businessName').value  = data.business_name || '';
+                    document.getElementById('systemPrompt').value  = data.system_prompt || '';
+                    document.getElementById('phoneNumberId').value = data.whatsapp_phone_number_id || '';
+                    document.getElementById('metaAccessToken').value = data.meta_access_token || '';
+                    document.getElementById('handoffNumber').value = data.human_handoff_number || '';
+                    document.getElementById('frontOfficeNumber').value = data.front_office_number || '';
+                    if (data.knowledge_base) {
+                        document.getElementById('knowledgeBase').value = data.knowledge_base;
+                    } else {
+                        autoGenerateKnowledgeBase();
+                    }
+                    showToast('Data loaded successfully!');
+                }
+            } catch (err) {
+                console.error('Failed to load data:', err);
+                autoGenerateKnowledgeBase();
+            }
+        }
+
+        // ===== SAVE TENANT DATA =====
+        async function saveTenantData() {
+            const payload = {
+                business_name: document.getElementById('businessName').value,
+                system_prompt: document.getElementById('systemPrompt').value,
+                knowledge_base: document.getElementById('knowledgeBase').value,
+                human_handoff_number: document.getElementById('handoffNumber').value,
+                front_office_number: document.getElementById('frontOfficeNumber').value
+            };
+            const phoneId     = document.getElementById('phoneNumberId').value;
+            const accessToken = document.getElementById('metaAccessToken').value;
+            if (phoneId)     payload.whatsapp_phone_number_id = phoneId;
+            if (accessToken) payload.meta_access_token = accessToken;
+
+            try {
+                const res = await authFetch(API_URL, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                showToast(res.ok ? '✅ Saved & Synced Live to WhatsApp AI Bot!' : '❌ Failed to save changes.');
+            } catch {
+                showToast('❌ Server error saving data.');
+            }
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastMsg').innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3500);
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // LOGIN PORTAL REMOVED: Auto bypass login
+            document.getElementById('loginOverlay').style.display = 'none';
+            afterLogin();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order & Product Management Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --accent: #10b981;
+            --gold: #f59e0b;
+            --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body {
+            background-color: var(--bg-dark);
+            background-image: radial-gradient(at 0% 0%, rgba(99,102,241,0.15) 0px, transparent 50%),
+                              radial-gradient(at 100% 100%, rgba(16,185,129,0.15) 0px, transparent 50%);
+            color: var(--text-main); min-height: 100vh;
+        }
+        .navbar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 1.25rem 2rem;
+            background: linear-gradient(135deg, rgba(75,85,99,0.45), rgba(55,65,81,0.55));
+            backdrop-filter: blur(16px); border-bottom: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 100;
+        }
+        .brand { display: flex; align-items: center; gap: 0.75rem; font-size: 1.25rem; font-weight: 700; color: #fff; }
+        .brand i { color: var(--primary); font-size: 1.5rem; }
+        .nav-links { display: flex; gap: 1rem; }
+        .nav-links a { color: var(--text-muted); text-decoration: none; padding: 0.5rem 1rem; border-radius: 0.5rem; transition: all 0.2s; font-weight: 500; }
+        .nav-links a:hover, .nav-links a.active { color: white; background: rgba(99,102,241,0.2); }
+        .container { max-width: 1400px; margin: 2rem auto; padding: 0 1.5rem; }
+        .tabs { display: flex; gap: 0.5rem; margin-bottom: 2rem; }
+        .tab-btn { padding: 0.75rem 1.5rem; border: 1px solid var(--card-border); background: var(--card-bg);
+            color: var(--text-muted); border-radius: 0.5rem; cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
+        .tab-btn.active { background: var(--primary); color: white; border-color: var(--primary); }
+        .tab-btn:hover { border-color: var(--primary); color: white; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .card { background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+            border-radius: 1rem; padding: 1.75rem; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.3); margin-bottom: 1.5rem; }
+        .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem; border-bottom: 1px solid var(--card-border); }
+        .card-header h2 { font-size: 1.15rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
+        .card-header h2 i { color: var(--primary); }
+        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+        .form-group { margin-bottom: 0.75rem; }
+        .form-group label { display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.4rem; }
+        .form-control { width: 100%; padding: 0.65rem 0.85rem; background: rgba(15,23,42,0.6); border: 1px solid var(--card-border);
+            border-radius: 0.5rem; color: var(--text-main); font-size: 0.95rem; transition: all 0.2s; }
+        .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99,102,241,0.2); }
+        .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1.25rem; border-radius: 0.5rem;
+            font-size: 0.9rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-success { background: var(--accent); color: white; }
+        .btn-success:hover { background: #059669; }
+        .btn-warning { background: var(--gold); color: #1a1a1a; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-sm { padding: 0.4rem 0.8rem; font-size: 0.8rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid var(--card-border); }
+        th { background: rgba(15,23,42,0.9); color: var(--text-muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+        tr:hover { background: rgba(99,102,241,0.05); }
+        .badge { display: inline-block; padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+        .badge-pending { background: rgba(245,158,11,0.2); color: var(--gold); }
+        .badge-uploaded { background: rgba(99,102,241,0.2); color: var(--primary); }
+        .badge-confirmed { background: rgba(16,185,129,0.2); color: var(--accent); }
+        .badge-shipped { background: rgba(56,189,248,0.2); color: #38bdf8; }
+        .badge-delivered { background: rgba(16,185,129,0.3); color: #34d399; }
+        .badge-cancelled { background: rgba(239,68,68,0.2); color: var(--danger); }
+        .badge-active { background: rgba(16,185,129,0.2); color: var(--accent); }
+        .badge-inactive { background: rgba(239,68,68,0.2); color: var(--danger); }
+        .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0.75rem; padding: 1.25rem; text-align: center; }
+        .stat-card .stat-num { font-size: 2rem; font-weight: 700; }
+        .stat-card .stat-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+        .toast { position: fixed; bottom: 2rem; right: 2rem; background: rgba(30,41,59,0.95); border: 1px solid var(--accent);
+            color: white; padding: 1rem 1.5rem; border-radius: 0.75rem; display: flex; align-items: center; gap: 0.75rem;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5); transform: translateY(150%); transition: transform 0.3s; z-index: 1000; }
+        .toast.show { transform: translateY(0); }
+        .empty-state { text-align: center; padding: 3rem; color: var(--text-muted); }
+        .empty-state i { font-size: 3rem; margin-bottom: 1rem; color: var(--card-border); }
+        .badge-lowstock { background: rgba(239,68,68,0.18); color: var(--danger); }
+        .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .kpi-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0.75rem; padding: 1.25rem; }
+        .kpi-card .kpi-num { font-size: 1.75rem; font-weight: 700; }
+        .kpi-card .kpi-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+        .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; }
+        .chart-wrap { position: relative; height: 280px; }
+        .low-stock-list { display: flex; flex-direction: column; gap: 0.5rem; }
+        .low-stock-row { display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 0.85rem;
+            background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); border-radius: 0.5rem; font-size: 0.88rem; }
+        .broadcast-recipients { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+            background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.25); border-radius: 0.5rem;
+            margin-bottom: 1rem; font-size: 0.9rem; }
+        .broadcast-warning { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: flex-start; }
+        .broadcast-warning i { color: var(--gold); margin-top: 0.15rem; }
+
+        /* ===== LOGIN OVERLAY ===== */
+        .login-overlay {
+            position: fixed; inset: 0; background: var(--bg-dark);
+            background-image: radial-gradient(at 0% 0%, rgba(99,102,241,0.2) 0px, transparent 50%),
+                               radial-gradient(at 100% 100%, rgba(16,185,129,0.2) 0px, transparent 50%);
+            display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 1rem;
+        }
+        .login-card {
+            background: var(--card-bg); backdrop-filter: blur(24px); border: 1px solid var(--card-border);
+            border-radius: 1.25rem; padding: 2.5rem 2rem; max-width: 420px; width: 100%;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.6);
+        }
+        .login-brand { text-align: center; margin-bottom: 1.75rem; }
+        .login-brand i { font-size: 3rem; color: var(--primary); margin-bottom: 0.75rem; display: block; }
+        .login-brand h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.3rem; }
+        .login-brand p { color: var(--text-muted); font-size: 0.88rem; }
+        .login-label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted);
+            margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .login-error { color: var(--danger); font-size: 0.83rem; margin-top: 0.75rem; display: none;
+            background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem; text-align: center; }
+        .btn-block { width: 100%; justify-content: center; }
+        .btn-logout { background: rgba(239,68,68,0.12); color: var(--danger); border: 1px solid rgba(239,68,68,0.28); }
+        .btn-logout:hover { background: rgba(239,68,68,0.22); }
+        .ws-status { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: var(--text-muted); }
+        .ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
+        .ws-dot.live { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+        @media(max-width:768px) {
+            .form-row { grid-template-columns: 1fr; }
+            .stats-row { grid-template-columns: 1fr 1fr; }
+            .charts-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ===== LOGIN OVERLAY ===== -->
+    <div id="loginOverlay" class="login-overlay">
+        <div class="login-card">
+            <div class="login-brand">
+                <i class="fa-solid fa-boxes-stacked"></i>
+                <h2>Order Dashboard</h2>
+                <p>Sign in to manage orders, products &amp; broadcasts</p>
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label class="login-label">Username</label>
+                <input type="text" id="loginUsername" class="form-control" placeholder="Your username" autocomplete="username"
+                    onkeydown="if(event.key==='Enter') document.getElementById('loginPassword').focus()">
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label class="login-label">Password</label>
+                <input type="password" id="loginPassword" class="form-control" placeholder="Your password" autocomplete="current-password"
+                    onkeydown="if(event.key==='Enter') login()">
+            </div>
+            <button class="btn btn-primary btn-block" onclick="login()">
+                <i class="fa-solid fa-right-to-bracket"></i> Sign In
+            </button>
+            <div id="loginError" class="login-error">
+                <i class="fa-solid fa-circle-exclamation"></i> Incorrect username or password.
+            </div>
+        </div>
+    </div>
+
+    <nav class="navbar">
+        <div class="brand"><i class="fa-solid fa-boxes-stacked"></i><span>Order & Product Dashboard</span></div>
+        <div class="nav-links" style="align-items:center;">
+            <a href="/admin">Admin</a>
+            <a href="/orders" class="active">Orders</a>
+            <a href="/train">Train Bot</a>
+            <a href="/business-ideas">Ideas</a>
+            <a href="/docs">API Docs</a>
+            <span class="ws-status"><span class="ws-dot" id="wsDot"></span><span id="wsLabel">Live updates off</span></span>
+            <span id="loggedInAs" style="color:var(--text-muted);font-size:0.85rem;"></span>
+            <button class="btn btn-logout btn-sm" onclick="logout()"><i class="fa-solid fa-right-from-bracket"></i> Logout</button>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="stats-row" id="statsRow">
+            <div class="stat-card"><div class="stat-num" id="statTotal">0</div><div class="stat-label">Total Orders</div></div>
+            <div class="stat-card"><div class="stat-num" id="statPending" style="color:var(--gold)">0</div><div class="stat-label">Pending Payment</div></div>
+            <div class="stat-card"><div class="stat-num" id="statUploaded" style="color:var(--primary)">0</div><div class="stat-label">Receipt Uploaded</div></div>
+            <div class="stat-card"><div class="stat-num" id="statConfirmed" style="color:var(--accent)">0</div><div class="stat-label">Confirmed</div></div>
+            <div class="stat-card"><div class="stat-num" id="statProducts" style="color:#38bdf8">0</div><div class="stat-label">Active Products</div></div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('orders')"><i class="fa-solid fa-receipt"></i> Orders</button>
+            <button class="tab-btn" onclick="switchTab('products')"><i class="fa-solid fa-box"></i> Products</button>
+            <button class="tab-btn" onclick="switchTab('analytics')"><i class="fa-solid fa-chart-line"></i> Analytics</button>
+            <button class="tab-btn" onclick="switchTab('broadcast')"><i class="fa-solid fa-bullhorn"></i> Broadcast</button>
+            <button class="tab-btn" onclick="switchTab('settings')"><i class="fa-solid fa-gear"></i> Bank Settings</button>
+        </div>
+
+        <!-- ORDERS TAB -->
+        <div class="tab-content active" id="tab-orders">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-receipt"></i> All Orders</h2>
+                    <div style="display:flex;gap:0.5rem;align-items:center;">
+                        <select class="form-control" style="width:auto" id="orderFilter" onchange="loadOrders()">
+                            <option value="">All Statuses</option>
+                            <option value="pending_payment">Pending Payment</option>
+                            <option value="payment_uploaded">Receipt Uploaded</option>
+                            <option value="confirmed">Confirmed</option>
+                            <option value="shipped">Shipped</option>
+                            <option value="delivered">Delivered</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                        <button class="btn btn-secondary btn-sm" onclick="exportOrdersCsv()"><i class="fa-solid fa-file-csv"></i> Export CSV</button>
+                    </div>
+                </div>
+                <div style="overflow-x:auto">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Order #</th><th>Customer</th><th>Product</th><th>Qty</th><th>Total</th>
+                                <th>Status</th><th>Receipt Analysis</th><th>Date</th><th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ordersBody"></tbody>
+                    </table>
+                </div>
+                <div class="empty-state" id="ordersEmpty" style="display:none">
+                    <i class="fa-solid fa-inbox"></i>
+                    <p>No orders yet. Orders will appear here when customers place them via WhatsApp.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- PRODUCTS TAB -->
+        <div class="tab-content" id="tab-products">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-box"></i> Add New Product</h2>
+                </div>
+                <form id="productForm" onsubmit="addProduct(event)">
+                    <div class="form-row">
+                        <div class="form-group"><label>Product Name *</label><input type="text" id="pName" class="form-control" required placeholder="e.g. Wooden Chair"></div>
+                        <div class="form-group"><label>Price (Rs.) *</label><input type="number" id="pPrice" class="form-control" required step="0.01" placeholder="12500.00"></div>
+                        <div class="form-group"><label>Stock Quantity *</label><input type="number" id="pStock" class="form-control" required placeholder="100"></div>
+                        <div class="form-group"><label>Low Stock Alert Below</label><input type="number" id="pLowStock" class="form-control" value="5" placeholder="5"></div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group"><label>Description</label><input type="text" id="pDesc" class="form-control" placeholder="Brief product description"></div>
+                        <div class="form-group">
+                            <label>Product Image</label>
+                            <input type="file" id="pImageFile" accept="image/*" class="form-control" onchange="uploadProductImage(this)">
+                            <div id="pImagePreviewWrap" style="display:none;margin-top:0.5rem;align-items:center;gap:0.5rem;">
+                                <img id="pImagePreview" src="" style="width:52px;height:52px;object-fit:cover;border-radius:0.4rem;border:1px solid var(--card-border);">
+                                <span id="pImageStatus" style="font-size:0.8rem;color:var(--text-muted);"></span>
+                            </div>
+                            <input type="hidden" id="pImage" value="">
+                        </div>
+                        <div class="form-group" style="display:flex;align-items:flex-end"><button type="submit" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Add Product</button></div>
+                    </div>
+                </form>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2><i class="fa-solid fa-list"></i> Product Catalog</h2></div>
+                <div style="overflow-x:auto">
+                    <table>
+                        <thead><tr><th>ID</th><th>Name / Image</th><th>Price</th><th>Stock</th><th>Status</th><th>Actions</th></tr></thead>
+                        <tbody id="productsBody"></tbody>
+                    </table>
+                </div>
+                <div class="empty-state" id="productsEmpty" style="display:none">
+                    <i class="fa-solid fa-box-open"></i>
+                    <p>No products yet. Add your first product above!</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ANALYTICS TAB -->
+        <div class="tab-content" id="tab-analytics">
+            <div class="kpi-row" id="kpiRow">
+                <div class="kpi-card"><div class="kpi-num" id="kpiOrders">0</div><div class="kpi-label">Total Orders</div></div>
+                <div class="kpi-card"><div class="kpi-num" id="kpiRevenue" style="color:var(--accent)">Rs.0</div><div class="kpi-label">Confirmed Revenue</div></div>
+                <div class="kpi-card"><div class="kpi-num" id="kpiAvgOrder" style="color:var(--primary)">Rs.0</div><div class="kpi-label">Avg. Order Value</div></div>
+                <div class="kpi-card"><div class="kpi-num" id="kpiLowStock" style="color:var(--danger)">0</div><div class="kpi-label">Low Stock Items</div></div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="card">
+                    <div class="card-header"><h2><i class="fa-solid fa-chart-line"></i> Revenue — Last 14 Days</h2></div>
+                    <div class="chart-wrap"><canvas id="revenueChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h2><i class="fa-solid fa-chart-pie"></i> Orders by Status</h2></div>
+                    <div class="chart-wrap"><canvas id="statusChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="grid-2-analytics" style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:1.5rem;">
+                <div class="card">
+                    <div class="card-header"><h2><i class="fa-solid fa-ranking-star"></i> Top 5 Products</h2></div>
+                    <div class="chart-wrap" style="height:240px;"><canvas id="topProductsChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h2><i class="fa-solid fa-triangle-exclamation"></i> Low Stock Alerts</h2></div>
+                    <div class="low-stock-list" id="lowStockList"></div>
+                    <div class="empty-state" id="lowStockEmpty" style="display:none;padding:1.5rem;">
+                        <i class="fa-solid fa-circle-check" style="color:var(--accent);"></i>
+                        <p>All products are well stocked!</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BROADCAST TAB -->
+        <div class="tab-content" id="tab-broadcast">
+            <div class="card">
+                <div class="card-header"><h2><i class="fa-solid fa-bullhorn"></i> Send Broadcast Message</h2></div>
+                <div class="broadcast-recipients">
+                    <i class="fa-solid fa-users" style="color:var(--primary);"></i>
+                    <span id="broadcastRecipientCount">Loading recipients…</span>
+                    <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="exportCustomersCsv()"><i class="fa-solid fa-file-csv"></i> Export CSV</button>
+                </div>
+                <div class="form-group">
+                    <label>Message</label>
+                    <textarea id="broadcastMessage" class="form-control" style="min-height:120px;" placeholder="e.g. 🎉 New arrivals just landed! Reply 'shop' to browse."></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="sendBroadcastMessage()"><i class="fa-solid fa-paper-plane"></i> Send Broadcast</button>
+                <div class="broadcast-warning">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>WhatsApp only allows free-form messages to customers who messaged you within the last 24 hours. Customers outside that window may not receive this message unless sent via an approved template.</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- BANK SETTINGS TAB -->
+        <div class="tab-content" id="tab-settings">
+            <div class="card">
+                <div class="card-header"><h2><i class="fa-solid fa-building-columns"></i> Bank Transfer Details</h2></div>
+                <p style="color:var(--text-muted);margin-bottom:1rem;font-size:0.9rem">
+                    These bank details are sent to customers when they place an order, so they know where to transfer the payment.
+                </p>
+                <div class="form-group">
+                    <label>Bank Details (shown to customers after ordering)</label>
+                    <textarea id="bankDetails" class="form-control" style="min-height:150px;font-family:monospace" placeholder="Bank: Commercial Bank&#10;Account Name: My Business PVT Ltd&#10;Account Number: 12345678&#10;Branch: Colombo"></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="saveBankDetails()"><i class="fa-solid fa-save"></i> Save Bank Details</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"><i class="fa-solid fa-circle-check" style="color:var(--accent)"></i><span id="toastMsg"></span></div>
+
+    <script>
+        const TENANT_ID = 1;
+        const API_BASE = `/api/tenants/${TENANT_ID}`;
+
+        // ===== AUTH =====
+        function getToken() { return "bypass-token"; }
+
+        async function authFetch(url, options = {}) {
+            const token = getToken();
+            const headers = Object.assign({}, options.headers || {}, token ? { 'Authorization': `Bearer ${token}` } : {});
+            const res = await fetch(url, Object.assign({}, options, { headers }));
+            if (res.status === 401) {
+                showLoginOverlay('Your session expired. Please sign in again.');
+                throw new Error('Unauthorized');
+            }
+            return res;
+        }
+
+        async function login() {
+            const username = document.getElementById('loginUsername').value.trim();
+            const password = document.getElementById('loginPassword').value.trim();
+            const errEl = document.getElementById('loginError');
+            errEl.style.display = 'none';
+            if (!username || !password) return;
+
+            try {
+                const res = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    sessionStorage.setItem('adminToken', data.token);
+                    sessionStorage.setItem('adminUsername', data.username);
+                    sessionStorage.setItem('adminRole', data.role);
+                    document.getElementById('loginOverlay').style.display = 'none';
+                    afterLogin();
+                } else {
+                    errEl.style.display = 'block';
+                    document.getElementById('loginPassword').value = '';
+                    document.getElementById('loginPassword').focus();
+                }
+            } catch {
+                errEl.style.display = 'block';
+            }
+        }
+
+        function afterLogin() {
+            document.getElementById('loggedInAs').textContent =
+                `${sessionStorage.getItem('adminUsername')} (${sessionStorage.getItem('adminRole')})`;
+            loadOrders();
+            loadProducts();
+            loadBankDetails();
+            connectWebSocket();
+            setInterval(loadOrders, 60000); // fallback poll in case the WebSocket drops
+        }
+
+        function showLoginOverlay(message) {
+            sessionStorage.removeItem('adminToken');
+            document.getElementById('loginOverlay').style.display = 'flex';
+            if (message) {
+                const errEl = document.getElementById('loginError');
+                errEl.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> ${message}`;
+                errEl.style.display = 'block';
+            }
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('loginUsername').focus();
+        }
+
+        async function logout() {
+            try { await authFetch('/api/admin/logout', { method: 'POST' }); } catch {}
+            sessionStorage.clear();
+            document.getElementById('loginOverlay').style.display = 'flex';
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('loginUsername').focus();
+        }
+
+        // ===== LIVE UPDATES (WEBSOCKET) =====
+        let ws = null;
+
+        function connectWebSocket() {
+            const token = getToken();
+            if (!token) return;
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/orders/${TENANT_ID}?token=${token}`);
+
+            ws.onopen = () => {
+                document.getElementById('wsDot').classList.add('live');
+                document.getElementById('wsLabel').textContent = 'Live updates on';
+            };
+            ws.onclose = () => {
+                document.getElementById('wsDot').classList.remove('live');
+                document.getElementById('wsLabel').textContent = 'Live updates off';
+                // Try to reconnect after a short delay, unless we've been logged out
+                if (getToken()) setTimeout(connectWebSocket, 5000);
+            };
+            ws.onerror = () => ws.close();
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'order_created' || data.type === 'order_updated') {
+                        loadOrders();
+                        const analyticsTab = document.getElementById('tab-analytics');
+                        if (analyticsTab && analyticsTab.classList.contains('active')) loadAnalytics();
+                    }
+                } catch {}
+            };
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.add('active');
+            event.target.closest('.tab-btn').classList.add('active');
+            if (tab === 'analytics') loadAnalytics();
+            if (tab === 'broadcast') loadBroadcastRecipients();
+        }
+
+        function statusBadge(s) {
+            const map = {
+                'pending_payment': ['badge-pending', '⏳ Pending Payment'],
+                'payment_uploaded': ['badge-uploaded', '📸 Receipt Uploaded'],
+                'confirmed': ['badge-confirmed', '✅ Confirmed'],
+                'shipped': ['badge-shipped', '🚚 Shipped'],
+                'delivered': ['badge-delivered', '🎉 Delivered'],
+                'cancelled': ['badge-cancelled', '❌ Cancelled']
+            };
+            const [cls, label] = map[s] || ['badge-pending', s];
+            return `<span class="badge ${cls}">${label}</span>`;
+        }
+
+        function actionButtons(order) {
+            const s = order.status;
+            let btns = '';
+            if (s === 'payment_uploaded') {
+                btns += `<button class="btn btn-success btn-sm" onclick="changeStatus(${order.id},'confirmed')"><i class="fa-solid fa-check"></i> Confirm</button> `;
+                btns += `<button class="btn btn-danger btn-sm" onclick="changeStatus(${order.id},'cancelled')"><i class="fa-solid fa-xmark"></i> Reject</button>`;
+            } else if (s === 'confirmed') {
+                btns += `<button class="btn btn-primary btn-sm" onclick="changeStatus(${order.id},'shipped')"><i class="fa-solid fa-truck"></i> Ship</button>`;
+            } else if (s === 'shipped') {
+                btns += `<button class="btn btn-success btn-sm" onclick="changeStatus(${order.id},'delivered')"><i class="fa-solid fa-box-open"></i> Delivered</button>`;
+            }
+            if (s !== 'cancelled' && s !== 'delivered') {
+                btns += ` <button class="btn btn-danger btn-sm" onclick="changeStatus(${order.id},'cancelled')" title="Cancel"><i class="fa-solid fa-ban"></i></button>`;
+            }
+            return btns || '<span style="color:var(--text-muted)">—</span>';
+        }
+
+        async function loadOrders() {
+            const filter = document.getElementById('orderFilter').value;
+            const url = filter ? `${API_BASE}/orders?status=${filter}` : `${API_BASE}/orders`;
+            try {
+                const res = await authFetch(url);
+                const orders = await res.json();
+                const body = document.getElementById('ordersBody');
+                const empty = document.getElementById('ordersEmpty');
+
+                if (!orders.length) { body.innerHTML = ''; empty.style.display = 'block'; return; }
+                empty.style.display = 'none';
+
+                body.innerHTML = orders.map(o => `
+                    <tr>
+                        <td><strong>${o.order_number}</strong></td>
+                        <td>${o.customer_phone}</td>
+                        <td>
+                            ${o.items && o.items.length > 1
+                                ? o.items.map(i => `${i.product_name} x${i.quantity}`).join('<br>')
+                                : o.product_name}
+                        </td>
+                        <td>${o.quantity}</td>
+                        <td>Rs.${o.total_amount.toLocaleString()}</td>
+                        <td>${statusBadge(o.status)}</td>
+                        <td style="max-width:200px;font-size:0.8rem;color:var(--text-muted)">${o.payment_receipt_analysis || '—'}</td>
+                        <td style="font-size:0.8rem">${new Date(o.created_at).toLocaleString()}</td>
+                        <td style="white-space:nowrap">
+                            ${actionButtons(o)}
+                            <a href="/api/orders/${o.id}/invoice" target="_blank" class="btn btn-secondary btn-sm" title="Download Invoice"><i class="fa-solid fa-file-invoice"></i></a>
+                        </td>
+                    </tr>
+                `).join('');
+
+                // Update stats
+                const allRes = await authFetch(`${API_BASE}/orders`);
+                const allOrders = await allRes.json();
+                document.getElementById('statTotal').textContent = allOrders.length;
+                document.getElementById('statPending').textContent = allOrders.filter(o => o.status === 'pending_payment').length;
+                document.getElementById('statUploaded').textContent = allOrders.filter(o => o.status === 'payment_uploaded').length;
+                document.getElementById('statConfirmed').textContent = allOrders.filter(o => o.status === 'confirmed').length;
+            } catch (err) { console.error('Failed to load orders:', err); }
+        }
+
+        async function changeStatus(orderId, newStatus) {
+            const confirmBy = prompt('Confirmed by (your name):', 'Manager');
+            if (confirmBy === null) return;
+            try {
+                const res = await authFetch(`/api/orders/${orderId}/status`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: newStatus, confirmed_by: confirmBy || 'Manager' })
+                });
+                if (res.ok) {
+                    showToast(`Order status updated to "${newStatus}" ✅`);
+                    loadOrders();
+                } else {
+                    showToast('Failed to update order status ❌');
+                }
+            } catch (err) { showToast('Error updating status ❌'); }
+        }
+
+        async function loadProducts() {
+            try {
+                const res = await authFetch(`${API_BASE}/products`);
+                const products = await res.json();
+                const body = document.getElementById('productsBody');
+                const empty = document.getElementById('productsEmpty');
+
+                document.getElementById('statProducts').textContent = products.filter(p => p.is_active).length;
+
+                if (!products.length) { body.innerHTML = ''; empty.style.display = 'block'; return; }
+                empty.style.display = 'none';
+
+                body.innerHTML = products.map(p => `
+                    <tr>
+                        <td>${p.id}</td>
+                        <td style="display:flex;align-items:center;gap:0.5rem;min-width:160px;">
+                            ${p.image_url
+                                ? `<img src="${p.image_url}" style="width:40px;height:40px;object-fit:cover;border-radius:0.35rem;border:1px solid var(--card-border);flex-shrink:0;">`
+                                : `<div style="width:40px;height:40px;background:rgba(99,102,241,0.1);border-radius:0.35rem;border:1px solid var(--card-border);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><i class="fa-solid fa-image" style="color:var(--text-muted);font-size:0.9rem;"></i></div>`
+                            }
+                            <div><strong>${p.name}</strong>${p.description ? '<br><small style="color:var(--text-muted)">' + p.description + '</small>' : ''}</div>
+                        </td>
+                        <td>Rs.${p.price.toLocaleString()}</td>
+                        <td>
+                            ${p.stock_quantity}
+                            ${p.stock_quantity <= p.low_stock_threshold ? '<br><span class="badge badge-lowstock"><i class="fa-solid fa-triangle-exclamation"></i> Low Stock</span>' : ''}
+                        </td>
+                        <td><span class="badge ${p.is_active ? 'badge-active' : 'badge-inactive'}">${p.is_active ? 'Active' : 'Inactive'}</span></td>
+                        <td style="white-space:nowrap">
+                            <button class="btn btn-primary btn-sm" onclick="toggleProduct(${p.id}, ${!p.is_active})">${p.is_active ? 'Deactivate' : 'Activate'}</button>
+                            <button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})"><i class="fa-solid fa-trash"></i></button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (err) { console.error('Failed to load products:', err); }
+        }
+
+        async function uploadProductImage(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const statusEl = document.getElementById('pImageStatus');
+            const previewEl = document.getElementById('pImagePreview');
+            const wrapEl = document.getElementById('pImagePreviewWrap');
+            wrapEl.style.display = 'flex';
+            statusEl.textContent = 'Uploading...';
+            statusEl.style.color = 'var(--text-muted)';
+            previewEl.src = '';
+
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                const res = await authFetch('/api/upload/product-image', { method: 'POST', body: fd });
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('pImage').value = data.url;
+                    previewEl.src = data.url;
+                    statusEl.textContent = '✅ Uploaded';
+                    statusEl.style.color = 'var(--accent)';
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    statusEl.textContent = '❌ ' + (err.detail || 'Upload failed');
+                    statusEl.style.color = 'var(--danger)';
+                }
+            } catch {
+                statusEl.textContent = '❌ Upload error';
+                statusEl.style.color = 'var(--danger)';
+            }
+        }
+
+        async function addProduct(e) {
+            e.preventDefault();
+            const payload = {
+                name: document.getElementById('pName').value,
+                price: parseFloat(document.getElementById('pPrice').value),
+                stock_quantity: parseInt(document.getElementById('pStock').value),
+                low_stock_threshold: parseInt(document.getElementById('pLowStock').value) || 5,
+                description: document.getElementById('pDesc').value || null,
+                image_url: document.getElementById('pImage').value || null,
+                is_active: true
+            };
+            try {
+                const res = await authFetch(`${API_BASE}/products`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (res.ok) {
+                    showToast('Product added successfully! ✅');
+                    document.getElementById('productForm').reset();
+                    document.getElementById('pImage').value = '';
+                    document.getElementById('pImagePreviewWrap').style.display = 'none';
+                    loadProducts();
+                } else {
+                    showToast('Failed to add product ❌');
+                }
+            } catch (err) { showToast('Error adding product ❌'); }
+        }
+
+        async function toggleProduct(id, activate) {
+            try {
+                await authFetch(`/api/products/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_active: activate })
+                });
+                showToast(activate ? 'Product activated ✅' : 'Product deactivated');
+                loadProducts();
+            } catch (err) { showToast('Error updating product ❌'); }
+        }
+
+        async function deleteProduct(id) {
+            if (!confirm('Are you sure you want to delete this product?')) return;
+            try {
+                await authFetch(`/api/products/${id}`, { method: 'DELETE' });
+                showToast('Product deleted');
+                loadProducts();
+            } catch (err) { showToast('Error deleting product ❌'); }
+        }
+
+        async function loadBankDetails() {
+            try {
+                const res = await authFetch(`/api/tenants/${TENANT_ID}`);
+                const data = await res.json();
+                document.getElementById('bankDetails').value = data.bank_details || '';
+            } catch (err) { console.error('Failed to load bank details:', err); }
+        }
+
+        async function saveBankDetails() {
+            try {
+                const res = await authFetch(`/api/tenants/${TENANT_ID}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bank_details: document.getElementById('bankDetails').value })
+                });
+                if (res.ok) showToast('Bank details saved! ✅');
+                else showToast('Failed to save ❌');
+            } catch (err) { showToast('Error saving bank details ❌'); }
+        }
+
+        // ===== ANALYTICS =====
+        let revenueChartInstance = null;
+        let statusChartInstance = null;
+        let topProductsChartInstance = null;
+
+        const CHART_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#38bdf8', '#ef4444'];
+
+        async function loadAnalytics() {
+            try {
+                const res = await authFetch(`${API_BASE}/analytics`);
+                if (!res.ok) return;
+                const data = await res.json();
+
+                document.getElementById('kpiOrders').textContent = data.total_orders;
+                document.getElementById('kpiRevenue').textContent = `Rs.${data.total_revenue.toLocaleString()}`;
+                const avgOrder = data.total_orders > 0 ? data.total_revenue / data.total_orders : 0;
+                document.getElementById('kpiAvgOrder').textContent = `Rs.${avgOrder.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+                document.getElementById('kpiLowStock').textContent = data.low_stock_products.length;
+
+                renderRevenueChart(data.revenue_trend);
+                renderStatusChart(data.orders_by_status);
+                renderTopProductsChart(data.top_products);
+                renderLowStockList(data.low_stock_products);
+            } catch (err) { console.error('Failed to load analytics:', err); }
+        }
+
+        function renderRevenueChart(trend) {
+            const ctx = document.getElementById('revenueChart').getContext('2d');
+            const labels = trend.map(t => new Date(t.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
+            const values = trend.map(t => t.revenue);
+            if (revenueChartInstance) revenueChartInstance.destroy();
+            revenueChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Revenue (Rs.)',
+                        data: values,
+                        borderColor: '#6366f1',
+                        backgroundColor: 'rgba(99,102,241,0.15)',
+                        fill: true,
+                        tension: 0.35,
+                        pointRadius: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+                    }
+                }
+            });
+        }
+
+        function renderStatusChart(byStatus) {
+            const ctx = document.getElementById('statusChart').getContext('2d');
+            const labels = Object.keys(byStatus);
+            const values = Object.values(byStatus);
+            if (statusChartInstance) statusChartInstance.destroy();
+            if (!labels.length) return;
+            statusChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels.map(l => l.replace('_', ' ')),
+                    datasets: [{ data: values, backgroundColor: CHART_COLORS, borderWidth: 0 }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', boxWidth: 12, padding: 12 } } }
+                }
+            });
+        }
+
+        function renderTopProductsChart(topProducts) {
+            const ctx = document.getElementById('topProductsChart').getContext('2d');
+            if (topProductsChartInstance) topProductsChartInstance.destroy();
+            if (!topProducts.length) return;
+            topProductsChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: topProducts.map(p => p.name),
+                    datasets: [{
+                        label: 'Units Sold',
+                        data: topProducts.map(p => p.quantity_sold),
+                        backgroundColor: '#10b981',
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true },
+                        y: { ticks: { color: '#94a3b8' }, grid: { display: false } }
+                    }
+                }
+            });
+        }
+
+        function renderLowStockList(items) {
+            const list = document.getElementById('lowStockList');
+            const empty = document.getElementById('lowStockEmpty');
+            if (!items.length) {
+                list.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            empty.style.display = 'none';
+            list.innerHTML = items.map(p => `
+                <div class="low-stock-row">
+                    <span><i class="fa-solid fa-box" style="color:var(--danger);margin-right:0.5rem;"></i>${p.name}</span>
+                    <strong>${p.stock_quantity} left</strong>
+                </div>
+            `).join('');
+        }
+
+        // ===== BROADCAST =====
+        let broadcastRecipientCount = 0;
+
+        async function loadBroadcastRecipients() {
+            try {
+                const res = await authFetch(`${API_BASE}/customers`);
+                const data = await res.json();
+                broadcastRecipientCount = data.count;
+                document.getElementById('broadcastRecipientCount').textContent =
+                    `${data.count} customer${data.count === 1 ? '' : 's'} will receive this message`;
+            } catch (err) {
+                document.getElementById('broadcastRecipientCount').textContent = 'Could not load recipient count.';
+            }
+        }
+
+        async function sendBroadcastMessage() {
+            const message = document.getElementById('broadcastMessage').value.trim();
+            if (!message) { showToast('Please write a message first ❌'); return; }
+            if (broadcastRecipientCount === 0) { showToast('No customers to broadcast to yet.'); return; }
+
+            const ok = confirm(`Send this message to ${broadcastRecipientCount} customer(s)? This cannot be undone.`);
+            if (!ok) return;
+
+            try {
+                const res = await authFetch(`${API_BASE}/broadcast`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    showToast(`✅ Sent to ${data.sent}/${data.total_recipients} customers`);
+                    document.getElementById('broadcastMessage').value = '';
+                } else {
+                    showToast('Failed to send broadcast ❌');
+                }
+            } catch (err) { showToast('Error sending broadcast ❌'); }
+        }
+
+        // ===== CSV EXPORTS =====
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        async function exportOrdersCsv() {
+            try {
+                const res = await authFetch(`${API_BASE}/orders/export`);
+                if (!res.ok) { showToast('Failed to export orders ❌'); return; }
+                downloadBlob(await res.blob(), `orders_tenant_${TENANT_ID}.csv`);
+            } catch { showToast('Error exporting orders ❌'); }
+        }
+
+        async function exportCustomersCsv() {
+            try {
+                const res = await authFetch(`${API_BASE}/customers/export`);
+                if (!res.ok) { showToast('Failed to export customers ❌'); return; }
+                downloadBlob(await res.blob(), `customers_tenant_${TENANT_ID}.csv`);
+            } catch { showToast('Error exporting customers ❌'); }
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastMsg').innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3500);
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // LOGIN PORTAL REMOVED: Auto bypass login
+            document.getElementById('loginOverlay').style.display = 'none';
+            afterLogin();
+        });
+    </script>
+</body>
+</html>
