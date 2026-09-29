@@ -746,6 +746,24 @@ async def rebuild_tenant_knowledge_base(
     return {"message": "Knowledge base rebuilt.", "knowledge_base": knowledge_base}
 
 
+async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
+    """Injects live real-time ERP stock inventory into the AI's knowledge base."""
+    products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)
+    products_res = await db.execute(products_stmt)
+    live_products = products_res.scalars().all()
+    
+    inventory_str = "\n\n--- LIVE ERP INVENTORY ---\n"
+    if live_products:
+        for p in live_products:
+            status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
+            inventory_str += f"- {p.name}: ${p.price} ({status})\n"
+        inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
+    else:
+        inventory_str += "No products currently listed.\n"
+    
+    return (tenant.knowledge_base or "") + inventory_str
+
+
 @app.post("/api/tenants/{tenant_id}/preview", tags=["Bot Portal"])
 async def preview_bot_reply(
     tenant_id: int,
@@ -760,10 +778,12 @@ async def preview_bot_reply(
     tenant = await _get_tenant_or_404(db, tenant_id)
     documents = await get_tenant_documents(db, tenant.id, active_only=True)
     config = build_bot_config(tenant, documents)
+    
+    dynamic_kb = await get_dynamic_kb(tenant, db)
 
     reply, is_handoff = await generate_ai_response(
         system_prompt=tenant.system_prompt,
-        knowledge_base=tenant.knowledge_base,
+        knowledge_base=dynamic_kb,
         chat_history=[],
         user_message=payload.message,
         config=config,
@@ -1383,11 +1403,13 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     # documents all come from their own row, never from shared constants.
                     tenant_documents = await get_tenant_documents(db, tenant.id, active_only=True)
                     bot_config = build_bot_config(tenant, tenant_documents)
+                    
+                    dynamic_kb = await get_dynamic_kb(tenant, db)
 
                     # Generate Multilingual AI Response (gpt-4o-mini / Local Simulator)
                     ai_reply, is_handoff_requested = await generate_ai_response(
                         system_prompt=tenant.system_prompt,
-                        knowledge_base=tenant.knowledge_base,
+                        knowledge_base=dynamic_kb,
                         chat_history=formatted_history,
                         user_message=user_text,
                         config=bot_config

@@ -52,37 +52,13 @@ async def run_test():
     for q in test_questions:
         print(f"\n🗣️ Customer asks: '{q}'")
         
-        # MOCK OpenAI to simulate the AI thinking
-        mock_reply = "I'm sorry, I don't know."
-        if "check in" in q.lower(): mock_reply = "Check-in time is at 2:00 PM, and check-out is at 11:00 AM."
-        elif "pool" in q.lower(): mock_reply = "Yes, we have a pool! It is open from 6:00 AM to 10:00 PM."
-        elif "wifi" in q.lower(): mock_reply = "The Wi-Fi password for all guests is 'grandocean2026'."
-        elif "airport" in q.lower(): mock_reply = "Yes, we offer airport shuttles for $45 per trip."
-
-        with patch('ai_service.settings.OPENAI_API_KEY', 'fake_key'), \
-             patch('ai_service.AsyncOpenAI') as mock_openai:
-            
-            # Setup the mock async response
-            class MockChoice:
-                class MockMessage:
-                    content = mock_reply
-                message = MockMessage()
-            
-            class MockResponse:
-                choices = [MockChoice()]
-                
-            async def mock_create(*args, **kwargs):
-                return MockResponse()
-                
-            mock_openai.return_value.chat.completions.create = mock_create
-            
-            ai_reply, _ = await generate_ai_response(
-                system_prompt=tenant.system_prompt or "You are a helpful assistant.",
-                knowledge_base=tenant.knowledge_base or "",
-                chat_history=[],
-                user_message=q
-            )
-            print(f"🤖 Bot replies: {ai_reply}")
+        ai_reply, _ = await generate_ai_response(
+            system_prompt=tenant.system_prompt or "You are a helpful assistant.",
+            knowledge_base=tenant.knowledge_base or "",
+            chat_history=[],
+            user_message=q
+        )
+        print(f"🤖 Bot replies: {ai_reply}")
 
 if __name__ == "__main__":
     asyncio.run(run_test())
