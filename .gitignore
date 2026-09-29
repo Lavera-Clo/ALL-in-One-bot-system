@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 *.db
 .env
+
+# Client uploads — business documents must never be pushed to GitHub
+uploads/
+static/tenant_docs/
+*.db.bak*

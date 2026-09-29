@@ -1,36 +1,45 @@
 """
-Document library for each tenant — the additive replacement for the old
-"upload a PDF and overwrite everything" trainer.
+Document library for each tenant — additive, multi-model training.
 
-Old behaviour:
-    upload menu.pdf   -> knowledge_base = summary(menu.pdf)
-    upload policy.pdf -> knowledge_base = summary(policy.pdf)      # menu is gone, silently
+    upload menu.pdf   -> row 1 (queued) -> background training -> ready
+    upload policy.pdf -> row 2 (queued) -> background training -> ready
+    knowledge_base    =  compose(every active, trained row)
 
-New behaviour:
-    upload menu.pdf   -> row 1
-    upload policy.pdf -> row 2
-    knowledge_base    = compose(row 1, row 2)                      # rebuilt from the rows
+The knowledge base is DERIVED from the rows, so adding, editing, switching off or deleting
+one document never loses another. Training itself lives in training_pipeline.py; this file
+handles files on disk, database rows and the background job around it.
 
-Because the knowledge base is derived, deleting or deactivating a document rebuilds it
-correctly, and the raw text of every upload is kept so it can be re-summarised later.
+Files:
+    uploads/<tenant>/...            private original of every upload (never served; used to retrain)
+    static/tenant_docs/<tenant>/... public copy, only for documents the bot may SEND to customers
 """
 
+import io
+import json
 import logging
 import os
 import re
 import uuid
 
+from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import llm_router
 from config import settings
+from database import AsyncSessionLocal
 from models import Tenant, TenantDocument
-from training_service import analyze_document, compose_knowledge_base, extract_text_from_pdf
+from training_pipeline import clean_keywords, train_document
+from training_service import compose_knowledge_base
 
 logger = logging.getLogger("uvicorn.error")
 
-DOCS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "tenant_docs")
-MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB — Meta's document limit for WhatsApp is 100 MB
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_ROOT = os.path.join(PROJECT_ROOT, "uploads")
+PUBLIC_ROOT = os.path.join(PROJECT_ROOT, "static", "tenant_docs")
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+NOTES_MARKER = "### Additional notes\n"
+DOC_TYPES = ("knowledge", "sendable", "both")
 
 
 def _safe_filename(filename: str) -> str:
@@ -40,20 +49,53 @@ def _safe_filename(filename: str) -> str:
     return cleaned[:120] or "document.pdf"
 
 
-def save_document_file(tenant_id: int, filename: str, content: bytes) -> tuple[str, str]:
-    """Write the upload under static/tenant_docs/<tenant_id>/ and return (disk_path, public_url)."""
-    tenant_dir = os.path.join(DOCS_ROOT, str(tenant_id))
-    os.makedirs(tenant_dir, exist_ok=True)
-
-    safe = _safe_filename(filename)
-    stored_name = f"{uuid.uuid4().hex[:8]}_{safe}"
-    disk_path = os.path.join(tenant_dir, stored_name)
-    with open(disk_path, "wb") as fh:
+def _write(root: str, tenant_id: int, filename: str, content: bytes) -> tuple[str, str]:
+    folder = os.path.join(root, str(tenant_id))
+    os.makedirs(folder, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex[:8]}_{_safe_filename(filename)}"
+    path = os.path.join(folder, stored_name)
+    with open(path, "wb") as fh:
         fh.write(content)
+    return path, stored_name
 
-    public_url = f"{settings.BASE_URL.rstrip('/')}/static/tenant_docs/{tenant_id}/{stored_name}"
-    return disk_path, public_url
 
+def _publish(tenant_id: int, filename: str, content: bytes) -> tuple[str, str]:
+    """Public copy the bot can send on WhatsApp. Returns (disk_path, public_url)."""
+    path, stored_name = _write(PUBLIC_ROOT, tenant_id, filename, content)
+    return path, f"{settings.BASE_URL.rstrip('/')}/static/tenant_docs/{tenant_id}/{stored_name}"
+
+
+def _remove_if_ours(path: str | None) -> None:
+    """Delete a file only if this service created it — never a hand-placed file like static/pdfs/."""
+    if not path or not os.path.exists(path):
+        return
+    real = os.path.realpath(path)
+    if real.startswith(os.path.realpath(UPLOAD_ROOT)) or real.startswith(os.path.realpath(PUBLIC_ROOT)):
+        try:
+            os.remove(real)
+        except OSError as e:
+            logger.warning(f"Could not delete file {real}: {e}")
+
+
+def _default_title(filename: str | None) -> str:
+    stem = (filename or "").rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip()
+    return (stem or "Pasted notes")[:120]
+
+
+def _pdf_text_layer(content: bytes) -> str:
+    """Quick text-layer read, used to validate the upload before training starts."""
+    try:
+        reader = PdfReader(io.BytesIO(content))
+    except Exception as e:  # noqa: BLE001 — pypdf raises many types on corrupt files
+        raise ValueError(f"This file could not be opened as a PDF ({e}).")
+    if reader.is_encrypted:
+        raise ValueError("This PDF is password-protected. Remove the password and upload it again.")
+    return "\n".join((p.extract_text() or "") for p in reader.pages).strip()
+
+
+# ---------------------------------------------------------------------------
+# Queries
+# ---------------------------------------------------------------------------
 
 async def get_tenant_documents(db: AsyncSession, tenant_id: int, active_only: bool = False):
     stmt = select(TenantDocument).where(TenantDocument.tenant_id == tenant_id)
@@ -65,10 +107,10 @@ async def get_tenant_documents(db: AsyncSession, tenant_id: int, active_only: bo
 
 async def rebuild_knowledge_base(db: AsyncSession, tenant: Tenant) -> str:
     """
-    Recompute tenant.knowledge_base from the tenant's active documents.
+    Recompute tenant.knowledge_base from the tenant's documents.
 
-    Called after every add, edit, toggle and delete — the single place the knowledge base
-    is ever written, which is what stops one upload from wiping another.
+    The single place the knowledge base is ever written, which is what stops one upload
+    from wiping another.
     """
     documents = await get_tenant_documents(db, tenant.id)
     tenant.knowledge_base = compose_knowledge_base(documents)
@@ -77,7 +119,11 @@ async def rebuild_knowledge_base(db: AsyncSession, tenant: Tenant) -> str:
     return tenant.knowledge_base
 
 
-async def add_document(
+# ---------------------------------------------------------------------------
+# Create + train
+# ---------------------------------------------------------------------------
+
+async def create_document(
     db: AsyncSession,
     tenant: Tenant,
     *,
@@ -88,86 +134,208 @@ async def add_document(
     doc_type: str = "both",
 ) -> TenantDocument:
     """
-    Add ONE document to this tenant's library and rebuild their knowledge base.
+    Validate and store an upload, and queue it for training. Returns immediately —
+    call run_training(document.id) (normally as a background task) to train it.
 
-    Accepts either an uploaded file (PDF or UTF-8 text) or pasted text. Raises ValueError
-    with a message suitable for showing the client.
+    Raises ValueError with a message suitable for showing the client.
     """
-    if doc_type not in ("knowledge", "sendable", "both"):
+    if doc_type not in DOC_TYPES:
         raise ValueError("doc_type must be 'knowledge', 'sendable' or 'both'.")
 
-    raw_text = ""
-    stored_path = None
-    file_url = None
+    quick_text = ""
+    stored_path = public_path = file_url = None
     source = "text"
 
     if content is not None:
         if len(content) > MAX_UPLOAD_BYTES:
             raise ValueError(f"File is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
-
-        name = (filename or "").lower()
-        if name.endswith(".pdf"):
-            raw_text = await extract_text_from_pdf(content)
+        if (filename or "").lower().endswith(".pdf"):
             source = "pdf"
-            if not raw_text.strip():
+            quick_text = _pdf_text_layer(content)
+            if not quick_text and not llm_router.role_candidates("reader"):
                 raise ValueError(
-                    "No text could be read from this PDF. It is probably a scanned image — "
-                    "export a text PDF, or paste the details in as text instead."
-                )
+                    "This PDF is a scanned image with no text. Reading it needs an AI vision "
+                    "provider — add GEMINI_API_KEY to .env, or paste the details as text.")
+            stored_path, _ = _write(UPLOAD_ROOT, tenant.id, filename, content)
+            if doc_type in ("sendable", "both"):
+                public_path, file_url = _publish(tenant.id, filename, content)
         else:
             try:
-                raw_text = content.decode("utf-8")
-                source = "text"
+                quick_text = content.decode("utf-8")
             except UnicodeDecodeError:
                 raise ValueError("Uploaded file must be a PDF or a UTF-8 text file.")
 
-        # Only files the bot can actually send get stored and given a public URL.
-        if doc_type in ("sendable", "both") and source == "pdf":
-            stored_path, file_url = save_document_file(tenant.id, filename or "document.pdf", content)
+    notes = (pasted_text or "").strip()
+    if notes:
+        quick_text = f"{quick_text}\n\n{NOTES_MARKER}{notes}".strip() if source == "pdf" else f"{quick_text}\n{notes}".strip()
 
-    if pasted_text and pasted_text.strip():
-        raw_text = f"{raw_text}\n{pasted_text.strip()}".strip()
-
-    if not raw_text.strip():
+    if source != "pdf" and not quick_text.strip():
         raise ValueError("No documentation provided.")
-
-    analysis = await analyze_document(raw_text, tenant.business_name, filename or title or "")
 
     document = TenantDocument(
         tenant_id=tenant.id,
-        title=(title or analysis["title"])[:255],
+        title=(title or _default_title(filename))[:255],
         source=source,
         original_filename=filename,
         stored_path=stored_path,
+        public_path=public_path,
         file_url=file_url,
-        # A pasted note or a plain-text upload has no file to send, so it can only be knowledge.
-        doc_type=doc_type if file_url else "knowledge",
-        raw_text=raw_text,
-        summary=analysis["summary"],
-        trigger_keywords=", ".join(analysis["keywords"]),
-        caption=analysis["caption"],
-        char_count=len(raw_text),
+        doc_type=doc_type if file_url else "knowledge",   # nothing to send without a file
+        raw_text=quick_text,
+        summary="",
+        trigger_keywords="",
+        caption=None,
+        char_count=len(quick_text),
         is_active=True,
+        status="queued",
+        training_stage="Waiting to start",
+        training_progress=0,
     )
     db.add(document)
     await db.commit()
     await db.refresh(document)
-
-    await rebuild_knowledge_base(db, tenant)
-    logger.info(f"Tenant {tenant.id}: added document '{document.title}' ({document.char_count} chars).")
+    logger.info(f"Tenant {tenant.id}: queued '{document.title}' for training.")
     return document
 
 
+def _split_notes(raw_text: str) -> str:
+    return raw_text.split(NOTES_MARKER, 1)[1].strip() if NOTES_MARKER in (raw_text or "") else ""
+
+
+async def run_training(document_id: int) -> None:
+    """
+    Background job: run the multi-model pipeline on one document and store the result.
+
+    Uses its own database session (the request that queued it has already finished).
+    On failure the document keeps its previous summary, so a failed RETRAIN never makes
+    the bot forget something it already knew.
+    """
+    async with AsyncSessionLocal() as db:
+        document = await db.get(TenantDocument, document_id)
+        if not document:
+            return
+        tenant = await db.get(Tenant, document.tenant_id)
+        if not tenant:
+            return
+
+        async def progress(stage: str, percent: int) -> None:
+            document.status = "processing"
+            document.training_stage = stage
+            document.training_progress = max(0, min(99, percent))
+            await db.commit()
+
+        await progress("Starting", 2)
+
+        pdf_bytes = None
+        if document.stored_path and document.stored_path.lower().endswith(".pdf") and os.path.exists(document.stored_path):
+            with open(document.stored_path, "rb") as fh:
+                pdf_bytes = fh.read()
+        plain_text = _split_notes(document.raw_text) if pdf_bytes else (document.raw_text or "")
+
+        try:
+            result = await train_document(
+                business_name=tenant.business_name,
+                filename=document.original_filename or document.title,
+                pdf_bytes=pdf_bytes,
+                plain_text=plain_text,
+                title_hint=document.title,
+                progress=progress,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the portal
+            logger.exception(f"Training failed for document {document_id}")
+            document.status = "failed"
+            document.training_stage = str(exc)[:500] or exc.__class__.__name__
+            document.training_progress = 0
+            await db.commit()
+            return
+
+        document.summary = result.summary
+        document.raw_text = result.source_text
+        document.char_count = len(result.source_text)
+        document.extraction_method = result.extraction_method
+        document.training_report = json.dumps(result.report, ensure_ascii=False)
+
+        # Never overwrite what the owner typed: only fill title/keywords/caption if still default.
+        if document.title == _default_title(document.original_filename):
+            document.title = result.title[:255]
+        if not (document.trigger_keywords or "").strip():
+            document.trigger_keywords = ", ".join(result.keywords)
+        if not (document.caption or "").strip():
+            document.caption = result.caption
+
+        document.status = "ready"
+        document.training_stage = "Trained"
+        document.training_progress = 100
+        await db.commit()
+        await rebuild_knowledge_base(db, tenant)
+        logger.info(f"Tenant {tenant.id}: trained '{document.title}' in "
+                    f"{result.report.get('duration_seconds')}s ({result.report.get('facts')} facts).")
+
+
+async def add_document(db: AsyncSession, tenant: Tenant, **kwargs) -> TenantDocument:
+    """Create AND train in one call (blocks for the whole pipeline). For scripts and the legacy endpoint."""
+    document = await create_document(db, tenant, **kwargs)
+    await run_training(document.id)
+    await db.refresh(document)
+    await db.refresh(tenant)
+    if document.status == "failed":
+        raise ValueError(document.training_stage or "Training failed.")
+    return document
+
+
+async def queue_retrain(db: AsyncSession, document: TenantDocument) -> TenantDocument:
+    """Mark a document for retraining; the caller schedules run_training(document.id)."""
+    if not document.stored_path and not (document.raw_text or "").strip():
+        raise ValueError("This document has no stored file or text to retrain from.")
+    document.status = "queued"
+    document.training_stage = "Waiting to start"
+    document.training_progress = 0
+    await db.commit()
+    await db.refresh(document)
+    return document
+
+
+async def recover_interrupted_trainings() -> int:
+    """On startup: jobs that were running when the server stopped will never finish on their own."""
+    async with AsyncSessionLocal() as db:
+        stmt = select(TenantDocument).where(TenantDocument.status.in_(("queued", "processing")))
+        stuck = list((await db.execute(stmt)).scalars().all())
+        for document in stuck:
+            document.status = "failed"
+            document.training_stage = "Interrupted by a server restart — press Retrain."
+            document.training_progress = 0
+        await db.commit()
+        return len(stuck)
+
+
+# ---------------------------------------------------------------------------
+# Edit / delete
+# ---------------------------------------------------------------------------
+
 async def update_document(db: AsyncSession, document: TenantDocument, tenant: Tenant, **fields) -> TenantDocument:
-    """Edit a document's title, keywords, caption, summary, type or active flag, then rebuild."""
+    """Edit title, keywords, caption, summary, type or active flag, then rebuild the knowledge base."""
     editable = {"title", "trigger_keywords", "caption", "summary", "doc_type", "is_active"}
     for key, value in fields.items():
-        if key in editable and value is not None:
-            if key == "doc_type" and value not in ("knowledge", "sendable", "both"):
+        if key not in editable or value is None:
+            continue
+        if key == "doc_type":
+            if value not in DOC_TYPES:
                 raise ValueError("doc_type must be 'knowledge', 'sendable' or 'both'.")
-            if key == "doc_type" and value in ("sendable", "both") and not document.file_url:
-                raise ValueError("This entry has no file attached, so it can only be 'knowledge'.")
-            setattr(document, key, value)
+            if value in ("sendable", "both") and not document.file_url:
+                has_pdf = document.stored_path and document.stored_path.lower().endswith(".pdf") \
+                    and os.path.exists(document.stored_path)
+                if not has_pdf:
+                    raise ValueError("This entry has no PDF attached, so it can only be 'knowledge'.")
+                with open(document.stored_path, "rb") as fh:
+                    document.public_path, document.file_url = _publish(
+                        tenant.id, document.original_filename or "document.pdf", fh.read())
+            elif value == "knowledge" and document.public_path:
+                _remove_if_ours(document.public_path)
+                document.public_path = None
+                document.file_url = None
+        if key == "trigger_keywords":
+            value = ", ".join(clean_keywords([k for k in value.split(",")], tenant.business_name))
+        setattr(document, key, value)
 
     await db.commit()
     await rebuild_knowledge_base(db, tenant)
@@ -176,30 +344,10 @@ async def update_document(db: AsyncSession, document: TenantDocument, tenant: Te
 
 
 async def delete_document(db: AsyncSession, document: TenantDocument, tenant: Tenant) -> None:
-    """Remove a document, its file on disk, and its contribution to the knowledge base."""
-    path = document.stored_path
+    """Remove a document, the files this service created for it, and its part of the knowledge base."""
+    paths = [document.stored_path, document.public_path]
     await db.delete(document)
     await db.commit()
-
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except OSError as e:
-            logger.warning(f"Could not delete file {path}: {e}")
-
+    for path in paths:
+        _remove_if_ours(path)
     await rebuild_knowledge_base(db, tenant)
-
-
-async def retrain_document(db: AsyncSession, document: TenantDocument, tenant: Tenant) -> TenantDocument:
-    """Re-run the AI summariser over the stored raw text (after a prompt or model change)."""
-    if not (document.raw_text or "").strip():
-        raise ValueError("This document has no stored text to retrain from.")
-
-    analysis = await analyze_document(document.raw_text, tenant.business_name, document.original_filename or document.title)
-    document.summary = analysis["summary"]
-    if not (document.trigger_keywords or "").strip():
-        document.trigger_keywords = ", ".join(analysis["keywords"])
-    await db.commit()
-    await rebuild_knowledge_base(db, tenant)
-    await db.refresh(document)
-    return document

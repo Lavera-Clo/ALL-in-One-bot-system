@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import json
 import logging
 import os
 import re
@@ -11,7 +12,7 @@ from typing import List, Optional
 
 from fastapi import (
     FastAPI, Request, Response, Depends, HTTPException, status, Query,
-    UploadFile, File, Form, Header, WebSocket, WebSocketDisconnect
+    UploadFile, File, Form, Header, WebSocket, WebSocketDisconnect, BackgroundTasks
 )
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,7 +46,10 @@ from schemas import (
     TenantDocumentUpdate,
     BotPreviewRequest
 )
-from ai_service import generate_ai_response, get_pdfs_for_user_message, transcribe_audio, classify_product_from_image
+from ai_service import (
+    generate_ai_response, get_pdfs_for_user_message, resolve_reply_documents,
+    transcribe_audio, classify_product_from_image,
+)
 from whatsapp_client import (
     send_whatsapp_message,
     send_whatsapp_document,
@@ -96,6 +100,12 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler to initialize database tables and seed tenants on startup."""
     logger.info("Starting up WhatsApp AI Chatbot service...")
     await init_db()
+
+    # Background training jobs die with the process; mark them so the portal offers Retrain.
+    from document_service import recover_interrupted_trainings
+    interrupted = await recover_interrupted_trainings()
+    if interrupted:
+        logger.warning(f"{interrupted} document training job(s) were interrupted by the restart.")
 
     # Automatically seed Wasala Nature Resort tenant if not present
     async with AsyncSessionLocal() as session:
@@ -227,6 +237,28 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# ---------------------------------------------------------------------------
+# Duplicate-delivery guard for WhatsApp message IDs (in memory, per process).
+# With several server workers, move this to the database or Redis.
+# ---------------------------------------------------------------------------
+_SEEN_MESSAGES: dict = {}
+_SEEN_TTL_SECONDS = 6 * 3600
+
+
+def seen_before(message_id: Optional[str]) -> bool:
+    """True if this WhatsApp message ID was already handled recently; records it otherwise."""
+    if not message_id:
+        return False
+    now = datetime.now(timezone.utc).timestamp()
+    if len(_SEEN_MESSAGES) > 5000:
+        for key in [k for k, t in _SEEN_MESSAGES.items() if now - t > _SEEN_TTL_SECONDS]:
+            _SEEN_MESSAGES.pop(key, None)
+    if message_id in _SEEN_MESSAGES:
+        return True
+    _SEEN_MESSAGES[message_id] = now
+    return False
+
 
 # Mount static folder for serving PDFs, images, and admin interface
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -454,12 +486,16 @@ async def root():
 from training_service import extract_text_from_pdf
 from document_service import (
     add_document,
+    create_document,
     delete_document as remove_document,
     get_tenant_documents,
+    queue_retrain,
     rebuild_knowledge_base,
-    retrain_document,
+    recover_interrupted_trainings,
+    run_training,
     update_document,
 )
+import llm_router
 from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
 from tenant_config import DEFAULT_HANDOFF_RULES, build_bot_config, parse_quick_menu
 
@@ -493,6 +529,11 @@ def _document_payload(doc) -> dict:
         "is_active": doc.is_active,
         "char_count": doc.char_count,
         "summary": doc.summary,
+        "status": doc.status,
+        "training_stage": doc.training_stage,
+        "training_progress": doc.training_progress,
+        "training_report": json.loads(doc.training_report) if doc.training_report else None,
+        "extraction_method": doc.extraction_method,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
 
@@ -575,6 +616,7 @@ async def list_tenant_documents(
 @app.post("/api/tenants/{tenant_id}/documents", tags=["Bot Portal"])
 async def upload_tenant_document(
     tenant_id: int,
+    background_tasks: BackgroundTasks,
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
@@ -585,6 +627,9 @@ async def upload_tenant_document(
     """
     Add one document to this tenant's library. ADDITIVE — previously trained documents
     are kept, and the knowledge base is rebuilt from all of them.
+
+    Returns immediately with the document in 'queued' state; multi-model training
+    (training_pipeline.py) runs in the background. Poll GET .../documents for progress.
     """
     tenant = await _get_tenant_or_404(db, tenant_id)
 
@@ -592,7 +637,7 @@ async def upload_tenant_document(
     filename = file.filename if file else None
 
     try:
-        document = await add_document(
+        document = await create_document(
             db, tenant,
             content=content,
             filename=filename,
@@ -602,15 +647,11 @@ async def upload_tenant_document(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Document training failed for tenant {tenant_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to train on this document.")
 
-    documents = await get_tenant_documents(db, tenant.id)
+    background_tasks.add_task(run_training, document.id)
     return {
-        "message": f"'{document.title}' added. The bot now knows {len(documents)} document(s).",
+        "message": f"'{document.title}' uploaded. Training has started — it usually takes 1-3 minutes.",
         "document": _document_payload(document),
-        "knowledge_base": tenant.knowledge_base,
     }
 
 
@@ -642,10 +683,14 @@ async def edit_tenant_document(
 async def retrain_tenant_document(
     tenant_id: int,
     document_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(get_current_admin)
 ):
-    """Re-summarise one document from its stored raw text, without re-uploading the PDF."""
+    """
+    Re-run the full multi-model pipeline on a stored document (re-reads the original PDF
+    with AI vision). The previous summary stays live until the new one succeeds.
+    """
     tenant = await _get_tenant_or_404(db, tenant_id)
     stmt = select(TenantDocument).where(
         TenantDocument.id == document_id, TenantDocument.tenant_id == tenant.id
@@ -654,12 +699,15 @@ async def retrain_tenant_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    if document.status in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="This document is already training.")
     try:
-        document = await retrain_document(db, document, tenant)
+        document = await queue_retrain(db, document)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return {"message": "Document retrained.", "document": _document_payload(document)}
+    background_tasks.add_task(run_training, document.id)
+    return {"message": "Retraining started.", "document": _document_payload(document)}
 
 
 @app.delete("/api/tenants/{tenant_id}/documents/{document_id}", tags=["Bot Portal"])
@@ -679,6 +727,12 @@ async def delete_tenant_document(
 
     await remove_document(db, document, tenant)
     return {"message": "Document deleted and knowledge base rebuilt."}
+
+
+@app.get("/api/ai/providers", tags=["Bot Portal"])
+async def ai_provider_status(admin: AdminUser = Depends(get_current_admin)):
+    """Which AI providers are configured, which are paused (rate-limited / no quota), and usage."""
+    return llm_router.status()
 
 
 @app.post("/api/tenants/{tenant_id}/documents/rebuild", tags=["Bot Portal"])
@@ -714,7 +768,7 @@ async def preview_bot_reply(
         user_message=payload.message,
         config=config,
     )
-    attachments = get_pdfs_for_user_message(payload.message, config)
+    reply, attachments = resolve_reply_documents(reply, payload.message, config)
     return {"reply": reply, "handoff": is_handoff, "attachments": attachments}
 
 
@@ -832,6 +886,12 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     user_text = ""
 
                     if not customer_phone:
+                        continue
+
+                    # Meta retries a webhook it considers slow or failed. Without this, a slow
+                    # AI reply could make the customer receive the same answer two or three times.
+                    if seen_before(message.get("id")):
+                        logger.info(f"Skipping duplicate delivery of WhatsApp message {message.get('id')}")
                         continue
 
                     # -----------------------------------------------------------
@@ -1333,17 +1393,10 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         config=bot_config
                     )
 
-                    # Clean any leftover [SEND_DOC: ...] tags from AI reply text
-                    if "[SEND_DOC:" in ai_reply:
-                        try:
-                            start_idx = ai_reply.index("[SEND_DOC:")
-                            end_idx = ai_reply.index("]", start_idx)
-                            ai_reply = ai_reply.replace(ai_reply[start_idx:end_idx + 1], "").strip()
-                        except Exception:
-                            pass
-
-                    # Deterministic document attachment, matched against THIS tenant's own uploads
-                    docs_to_send = get_pdfs_for_user_message(user_text, bot_config)
+                    # Remove every [SEND_DOC: ...] tag from the text and pick this tenant's files to
+                    # attach: the AI's choice if it named one of THIS tenant's documents, otherwise
+                    # the deterministic keyword resolver.
+                    ai_reply, docs_to_send = resolve_reply_documents(ai_reply, user_text, bot_config)
 
                     # Store user message & AI response in database
                     user_history = ChatHistory(

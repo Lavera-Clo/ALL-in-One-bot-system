@@ -74,6 +74,16 @@ class TenantDocument(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Multi-model training runs in the background (training_pipeline.py), so the portal
+    # polls these. A document keeps its previous summary until a retrain succeeds.
+    status: Mapped[str] = mapped_column(String(20), default="ready", nullable=False)  # queued | processing | ready | failed
+    training_stage: Mapped[str | None] = mapped_column(Text, nullable=True)   # human-readable progress / error
+    training_progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 0-100
+    training_report: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: models used, numbers verified...
+    extraction_method: Mapped[str | None] = mapped_column(String(30), nullable=True)  # vision | vision+text | text | pasted
+    public_path: Mapped[str | None] = mapped_column(Text, nullable=True)      # public copy served to WhatsApp, if sendable
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

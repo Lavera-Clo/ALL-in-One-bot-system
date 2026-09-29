@@ -6,6 +6,8 @@ from typing import List, Dict, Tuple, Optional
 from openai import AsyncOpenAI
 from config import settings
 from prompts.persona_system_prompt import build_persona_prompt
+import llm_router
+from kb_retrieval import select_context
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -69,35 +71,23 @@ def get_pdfs_for_user_message(user_message: str, config=None) -> List[dict]:
 def get_openai_client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-async def transcribe_audio(audio_bytes: bytes, api_key: str) -> str:
+async def transcribe_audio(audio_bytes: bytes, api_key: str = "") -> str:
     """
-    Transcribes audio bytes (e.g. OGG from WhatsApp) to text using OpenAI Whisper.
+    Transcribes a WhatsApp voice note (OGG) to text. Uses Groq Whisper via llm_router, with
+    OpenAI Whisper as backup when OPENAI_API_KEY is set. `api_key` is kept for old callers.
     """
     if not audio_bytes:
         return ""
-    if not api_key or "placeholder" in api_key:
-        return ""
-    
+    # Guide Whisper to understand Sri Lankan context and Singlish better
+    whisper_prompt = (
+        "The user is a customer in Sri Lanka asking a local business about products, prices and bookings. "
+        "They might speak in English, Sinhala, or Singlish (Romanized Sinhala). "
+        "Examples of Singlish: 'package eke ganan kohomada', 'wedding ekata keeyada', 'menu eka ewanna'."
+    )
     try:
-        client = AsyncOpenAI(api_key=api_key)
-        # We must provide a tuple of (filename, file_bytes) for OpenAI client
-        file_tuple = ("voice_note.ogg", audio_bytes)
-        
-        # Guide Whisper to understand Sri Lankan context and Singlish better
-        whisper_prompt = (
-            "The user is a customer in Sri Lanka asking a local business about products, prices and bookings. "
-            "They might speak in English, Sinhala, or Singlish (Romanized Sinhala). "
-            "Examples of Singlish: 'package eke ganan kohomada', 'wedding ekata keeyada', 'menu eka ewanna'."
-        )
-        
-        response = await client.audio.transcriptions.create(
-            model="whisper-1",
-            file=file_tuple,
-            prompt=whisper_prompt
-        )
-        return response.text.strip()
+        return await llm_router.transcribe_audio(audio_bytes, "voice_note.ogg", whisper_prompt)
     except Exception as e:
-        logger.error(f"Error transcribing audio with Whisper: {e}")
+        logger.error(f"Error transcribing audio: {e}")
         return ""
 
 def get_sri_lanka_greeting() -> Tuple[str, str, str]:
@@ -529,6 +519,90 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
             )
 
 
+_PHONE_LIKE_RE = re.compile(r"\+?\d[\d\s\-()]{6,}\d")   # \s: models often use non-breaking spaces
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def unsupported_reply_numbers(reply: str, allowed_text: str, config) -> List[str]:
+    """
+    Numbers in the reply that appear nowhere in `allowed_text` (knowledge base, owner settings,
+    conversation). The business's own phone numbers are allowed in any spacing, and links are
+    ignored (wa.me links and file URLs are full of digits).
+    """
+    from training_pipeline import numbers_in
+
+    phones = set()
+    for number in (getattr(config, "front_office_number", None), getattr(config, "manager_whatsapp", None)):
+        digits = re.sub(r"\D", "", number or "")
+        if digits:
+            phones.add(digits)
+            if digits.startswith("94"):
+                phones.add("0" + digits[2:])       # local Sri Lankan form, e.g. 0342275000
+
+    check = _URL_RE.sub(" ", reply or "")
+    check = re.sub(r"[  -​  　]", " ", check)
+    check = _PHONE_LIKE_RE.sub(lambda m: " " if re.sub(r"\D", "", m.group(0)) in phones else m.group(0), check)
+    allowed = set(numbers_in(allowed_text)) | phones
+    return sorted({n for n in numbers_in(check) if n not in allowed})
+
+
+def safe_unknown_reply(lang: str, config) -> str:
+    """Used when the model keeps stating figures we can't verify: say so honestly, offer a human."""
+    contacts = config.contact_lines() if config else ""
+    if lang == "sinhala":
+        text = "නිවැරදිම තොරතුර ඔබට දෙන්න, මම ඒ ගැන අපේ කණ්ඩායමෙන් තහවුරු කරගන්නම් 🙏"
+    elif lang == "singlish":
+        text = "Hariyatama details denna, man eka ape team eken confirm karagannam 🙏"
+    else:
+        text = "I want to give you the exact figure, so let me confirm that with our team 🙏"
+    return f"{text}\n\n{contacts}".strip() if contacts else text
+
+
+# Tolerant: models write "[SEND_DOC: …]", "[ SEND_DOC : …]", "[send_doc: …]".
+_SEND_DOC_RE = re.compile(r"\[\s*SEND_DOC\s*:\s*([^\]|]+?)\s*(?:\|[^\]]*)?\]", re.IGNORECASE)
+
+
+def whatsapp_format(text: str) -> str:
+    """
+    Models write Markdown; WhatsApp does not render it. **bold** shows literal asterisks and
+    "# Heading" shows a hash. Convert to WhatsApp's own syntax.
+    """
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)                # **bold** -> *bold*
+    text = re.sub(r"__(.+?)__", r"_\1_", text)                        # __it__   -> _it_
+    text = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", r"*\1*", text)      # # Head   -> *Head*
+    text = re.sub(r"(?m)^(\s*)[-*]\s+", r"\1• ", text)                # - item   -> • item
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def resolve_reply_documents(reply: str, user_message: str, config) -> Tuple[str, List[dict]]:
+    """
+    Strip every [SEND_DOC: ...] tag from the AI's reply (customers must never see them) and
+    decide which of THIS tenant's files to attach.
+
+    The AI sees the whole conversation, so its choice wins when it made one — keyword
+    matching alone sent the banquet menu for "Silver menu price" because 'menu' is a keyword.
+    Tags are only honoured for URLs that belong to this tenant's own documents, so a model
+    can never make the bot send an arbitrary link. With no valid tag, the deterministic
+    keyword resolver decides, as before.
+    """
+    tagged_urls = _SEND_DOC_RE.findall(reply or "")
+    clean = _SEND_DOC_RE.sub("", reply or "")
+    clean = re.sub(r"[ \t]+\n", "\n", clean)
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+    allowed = {d.url: d for d in (config.documents if config else [])}
+    chosen, seen = [], set()
+    for url in tagged_urls:
+        doc = allowed.get(url.strip())
+        if doc and doc.url not in seen:
+            seen.add(doc.url)
+            chosen.append({"url": doc.url, "filename": doc.filename, "caption": doc.caption})
+    if not chosen:
+        chosen = get_pdfs_for_user_message(user_message, config)
+    return clean, chosen
+
+
 async def generate_ai_response(
     system_prompt: str,
     knowledge_base: str,
@@ -548,18 +622,15 @@ async def generate_ai_response(
         from tenant_config import BotConfig
         config = BotConfig(tenant_id=0, business_name="our business")
 
-    api_key = settings.OPENAI_API_KEY.strip() if settings.OPENAI_API_KEY else ""
-
-    # Fallback immediately if key is placeholder or empty
-    if not api_key or "placeholder" in api_key:
+    # No AI provider configured at all -> keyword simulator straight away.
+    if not llm_router.role_candidates("chat"):
         reply = smart_knowledge_base_search(user_message, knowledge_base, system_prompt, chat_history, config)
         is_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply
         reply = reply.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
         return reply, is_handoff
 
-    # Attempt OpenAI gpt-4o-mini API call
+    # Reply through the multi-provider router (Groq -> Gemini -> OpenRouter -> ...).
     try:
-        client = AsyncOpenAI(api_key=api_key)
         greeting_en, greeting_si, greeting_sg = get_sri_lanka_greeting()
         lang = detect_language_intent(user_message, chat_history)
         
@@ -624,18 +695,23 @@ async def generate_ai_response(
             "1. GIBBERISH DETECTION: If the customer sends random characters (e.g., 'asdfg', 'ffsdsff'), do NOT try to answer. Politely say: 'Sorry, I didn't quite catch that 😅 Could you rephrase what you need?'\n"
             "2. REPEATED QUESTIONS: If the customer asks the exact same question they already asked earlier in the chat history, do NOT just dump the same answer again. Acknowledge it by saying 'You actually asked about this earlier — here's what I shared:' and summarize the past answer briefly, asking if they need more specific details.\n"
             "3. RETURNING CUSTOMERS: If the customer says 'Hi' and there are previous messages in the chat history, greet them as a returning customer ('Welcome back! Last time we were chatting about [Topic]. How can I help today?').\n"
-            "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, do NOT hand off to the manager immediately. Instead, say: 'I didn't quite understand that. To help you better, could you please tell me again or rephrase your question? 🙏'\n"
+            "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team. Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Only ask them to rephrase if their message was genuinely unclear.\n"
             "------------------------------------------\n"
         )
 
         # Build persona prompt (the warm, human-like "Nethmi" persona)
         persona_prompt = build_persona_prompt(config)
 
+        # Only the knowledge-base sections this message needs (see kb_retrieval.py).
+        kb_context, kb_info = await select_context(knowledge_base, user_message, chat_history)
+        logger.info(f"[chat] knowledge base: {kb_info.get('mode')} {kb_info.get('chars')}"
+                    f"/{kb_info.get('of', kb_info.get('chars'))} chars {kb_info.get('sections', '')}")
+
         full_system_instructions = (
             f"{persona_prompt}\n\n"
             f"{system_prompt}\n\n"
-            f"--- KNOWLEDGE BASE ---\n"
-            f"{knowledge_base}\n"
+            f"--- KNOWLEDGE BASE (the parts relevant to this message) ---\n"
+            f"{kb_context}\n"
             f"----------------------\n"
             f"{lang_instruction}\n"
             f"{negotiation_handoff_rules}\n"
@@ -647,19 +723,42 @@ async def generate_ai_response(
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=500
-        )
-        reply_content = response.choices[0].message.content.strip()
+        result = await llm_router.complete("chat", messages, max_tokens=1500, temperature=0.7, timeout=45)
+        logger.info(f"[chat] reply by {result.label} in {result.latency:.1f}s")
+        reply_content = whatsapp_format(result.text.strip())
+
+        # Number guard: every price, count, time or date the bot states must exist in the
+        # knowledge base, the owner's own settings, or the conversation. Models occasionally
+        # invent a figure when the fact is missing (measured: "parking for around 120 cars"
+        # when the document only says "adequate parking"). A wrong number on a quote is a
+        # promise the business can't keep, so: redraft once, then refuse to guess.
+        allowed_text = "\n".join([knowledge_base or "", system_prompt or "", config.handoff_rules or "",
+                                  user_message] + [m.get("content", "") for m in chat_history])
+        invented = unsupported_reply_numbers(reply_content, allowed_text, config)
+        if invented:
+            logger.warning(f"[chat] {result.label} stated numbers not in the knowledge base {invented}; redrafting")
+            strict = list(messages)
+            strict[0] = {"role": "system", "content": messages[0]["content"] + (
+                "\n\n--- CORRECTION ---\n"
+                f"Your previous draft stated these numbers, which are NOT in the knowledge base: {', '.join(invented)}.\n"
+                "Write the reply again. Do not state ANY number, price, quantity, capacity, time or date "
+                "unless it is written in the knowledge base above. Never calculate totals. If the customer "
+                "needs a figure the knowledge base doesn't have, say you'll confirm it with the team.")}
+            try:
+                retry = await llm_router.complete("chat", strict, max_tokens=1500, temperature=0.2, timeout=45)
+                reply_content = whatsapp_format(retry.text.strip())
+                invented = unsupported_reply_numbers(reply_content, allowed_text, config)
+            except llm_router.LLMUnavailable:
+                pass
+            if invented:
+                logger.warning(f"[chat] redraft still had unsupported numbers {invented}; sending a safe reply")
+                return safe_unknown_reply(lang, config), True
         is_human_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply_content
         reply_content = reply_content.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
         return reply_content, is_human_handoff
 
     except Exception as e:
-        logger.warning(f"OpenAI API Error ({e}). Using Smart Knowledge-Base Simulator fallback.")
+        logger.warning(f"All AI providers failed ({e}). Using Smart Knowledge-Base Simulator fallback.")
         reply = smart_knowledge_base_search(user_message, knowledge_base, system_prompt, chat_history, config)
         is_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply
         reply = reply.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()

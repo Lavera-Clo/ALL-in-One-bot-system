@@ -28,6 +28,22 @@ class Settings(BaseSettings):
     # Minutes of cart inactivity before a customer gets one abandoned-cart reminder.
     ABANDONED_CART_MINUTES: int = int(os.getenv("ABANDONED_CART_MINUTES", "30"))
 
+    # AI providers. Any combination may be set; llm_router.py tries them in order and
+    # falls back when one is rate-limited, overloaded or out of quota.
+    GEMINI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
+    MISTRAL_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_API_KEY_2: str = ""
+
+    # Optional per-job model overrides, as "provider:model,provider:model".
+    # Leave empty to use the defaults in llm_router.DEFAULT_ROLES.
+    LLM_CHAT_MODELS: str = ""
+    LLM_READER_MODELS: str = ""
+    LLM_EXTRACT_MODELS: str = ""
+    LLM_JUDGE_MODELS: str = ""
+    LLM_FAST_MODELS: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

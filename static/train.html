@@ -116,6 +116,25 @@
         .stat { background: rgba(15,23,42,0.5); border: 1px solid var(--card-border); border-radius: 0.6rem; padding: 0.7rem 1rem; }
         .stat b { display: block; font-size: 1.25rem; }
         .stat span { color: var(--text-muted); font-size: 0.78rem; }
+
+        .train-status { margin-top: 0.55rem; font-size: 0.83rem; line-height: 1.5; }
+        .train-status.ready { color: #6ee7b7; }
+        .train-status.failed { color: #fca5a5; }
+        .train-status.legacy { color: var(--text-muted); }
+        .progress { height: 6px; background: rgba(255,255,255,0.08); border-radius: 999px; overflow: hidden; margin-top: 0.45rem; max-width: 440px; }
+        .progress > div { height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); transition: width 0.6s ease; }
+        .spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.15);
+            border-left-color: var(--primary); border-radius: 50%; animation: spin 0.9s linear infinite; vertical-align: -1px; margin-right: 0.3rem; }
+        .report { background: rgba(0,0,0,0.25); border-radius: 0.6rem; padding: 0.4rem 1rem 0.9rem; font-size: 0.84rem; line-height: 1.55; }
+        .report dt { color: var(--text-muted); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.7rem; }
+        .report dd { margin: 0.1rem 0 0; }
+        .report ul { margin: 0.25rem 0 0 1.1rem; }
+        .muted { color: var(--text-muted); }
+        .warn-text { color: #fcd34d; }
+        .ai-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 1.1rem; }
+        .chip { font-size: 0.75rem; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.04); }
+        .chip.ok i { color: var(--accent); }
+        .chip.paused { color: #fcd34d; }
     </style>
 </head>
 <body>
@@ -165,7 +184,8 @@
     <div class="panel active" id="panel-docs">
         <div class="card">
             <h2><i class="fa-solid fa-plus"></i> Add a document</h2>
-            <p class="hint">Upload a PDF, or paste text. The AI reads it, writes a summary for the bot, and suggests the words a customer might type to receive this file.</p>
+            <p class="hint">Upload a PDF, or paste text. Several AI models read it — including scanned pages and price tables — list every fact and cross-check each other, and every price is verified against your document before the bot may use it.</p>
+            <div class="ai-strip" id="aiProviders"></div>
 
             <div class="upload-area" id="dropZone">
                 <i class="fa-regular fa-file-pdf"></i>
@@ -196,7 +216,7 @@
             </div>
 
             <div class="loader" id="uploadLoader"></div>
-            <button class="btn btn-primary btn-full" id="uploadBtn"><i class="fa-solid fa-wand-magic-sparkles"></i> Add &amp; train</button>
+            <button class="btn btn-primary btn-full" id="uploadBtn"><i class="fa-solid fa-wand-magic-sparkles"></i> Upload &amp; train</button>
         </div>
 
         <div class="card">
@@ -392,6 +412,7 @@ $('uploadBtn').addEventListener('click', async () => {
     try {
         const data = await api(`/api/tenants/${tenantId}/documents`, { method: 'POST', body: form });
         toast(data.message);
+        loadProviders();
         fileInput.value = ''; showFileName();
         $('pasteText').value = ''; $('docTitle').value = '';
         await loadDocuments();
@@ -400,11 +421,92 @@ $('uploadBtn').addEventListener('click', async () => {
 });
 
 // ---------- documents ----------
+const TRAINING = new Set(['queued', 'processing']);
+let pollTimer = null;
+let needsFullRender = false;
+
 function typeBadge(doc) {
     if (!doc.is_active) return '<span class="badge badge-off">OFF</span>';
     if (doc.doc_type === 'knowledge') return '<span class="badge badge-read">READS</span>';
     if (doc.doc_type === 'sendable') return '<span class="badge badge-send">SENDS</span>';
     return '<span class="badge badge-both">READS + SENDS</span>';
+}
+
+function modelsUsed(r) {
+    return new Set([...((r.reader && r.reader.models) || []), ...(r.extractors || []), ...(r.judges || [])]);
+}
+
+function reviewCount(r) {
+    return (r.warnings || []).length + (r.lines_removed || []).length;
+}
+
+function statusHtml(doc) {
+    if (TRAINING.has(doc.status)) {
+        return `<div class="train-status training">
+            <div><span class="spinner"></span> ${escapeHtml(doc.training_stage || 'Training…')}</div>
+            <div class="progress"><div style="width:${doc.training_progress || 0}%"></div></div>
+        </div>`;
+    }
+    if (doc.status === 'failed') {
+        return `<div class="train-status failed"><i class="fa-solid fa-triangle-exclamation"></i>
+            Training failed: ${escapeHtml(doc.training_stage || 'unknown error')}
+            <button class="btn btn-ghost btn-sm" data-act="retrain" data-id="${doc.id}" style="margin-left:0.4rem">Try again</button></div>`;
+    }
+    const r = doc.training_report;
+    if (!r) {
+        return `<div class="train-status legacy"><i class="fa-regular fa-circle"></i> Not trained with the AI pipeline yet —
+            <a href="#" data-act="retrain" data-id="${doc.id}" style="color:var(--primary)">train it now</a></div>`;
+    }
+    const bits = [];
+    if (r.facts != null) bits.push(`${r.facts} facts`);
+    if (r.numbers_verified != null) bits.push(`${r.numbers_verified} prices &amp; numbers verified`);
+    const models = modelsUsed(r);
+    if (models.size) bits.push(`${models.size} AI models`);
+    if (r.faq_count) bits.push(`${r.faq_count} FAQs`);
+    const review = reviewCount(r);
+    return `<div class="train-status ready"><i class="fa-solid fa-circle-check"></i> Trained · ${bits.join(' · ')}
+        ${review ? ` · <span style="color:var(--warn)">${review} to review</span>` : ''}</div>`;
+}
+
+function listHtml(items, render) {
+    return `<ul>${items.map((x) => `<li>${render(x)}</li>`).join('')}</ul>`;
+}
+
+function reportHtml(doc) {
+    const r = doc.training_report;
+    if (!r) return '';
+    const rd = r.reader || {};
+    const methodText = {
+        'vision': 'AI vision (reads scanned pages and tables)',
+        'vision+text': 'AI vision, cross-checked against the PDF text layer',
+        'text': 'PDF text layer only',
+        'pasted': 'Pasted text'
+    }[rd.method] || rd.method || '—';
+    const parts = [];
+    parts.push(`<dt>1 · Read</dt><dd>${escapeHtml(methodText)}${rd.pages ? ` · ${rd.pages} page(s)` : ''}
+        ${(rd.models || []).length ? `<br><span class="muted">by ${rd.models.map(escapeHtml).join(', ')}</span>` : ''}</dd>`);
+    if ((rd.numbers_read_differently || []).length) {
+        parts.push(`<dd class="warn-text">Two readers saw these numbers differently — check them in the PDF:
+            <b>${rd.numbers_read_differently.map(escapeHtml).join(', ')}</b></dd>`);
+    }
+    parts.push(`<dt>2 · Extract facts</dt><dd>${(r.extractors || []).length} model(s), independently:
+        <span class="muted">${(r.extractors || []).map(escapeHtml).join(', ') || '—'}</span></dd>`);
+    parts.push(`<dt>3 · Merge</dt><dd><span class="muted">${(r.judges || []).map(escapeHtml).join(', ') || 'no judge (single draft)'}</span></dd>`);
+    parts.push(`<dt>4 · Verify numbers</dt><dd>${r.numbers_verified ?? 0} numbers in the final text — every one found in your document.</dd>`);
+    if ((r.lines_corrected || []).length) {
+        parts.push(`<dd>Corrected to match the document:${listHtml(r.lines_corrected,
+            (c) => `<s>${escapeHtml(c.was)}</s> → ${escapeHtml(c.now)}`)}</dd>`);
+    }
+    if ((r.lines_removed || []).length) {
+        parts.push(`<dd class="warn-text">Removed because the number is not in the document:${listHtml(r.lines_removed, escapeHtml)}</dd>`);
+    }
+    parts.push(`<dt>5 · FAQ</dt><dd>${r.faq_count || 0} customer questions &amp; answers${r.faq_removed_for_bad_numbers ? ` (${r.faq_removed_for_bad_numbers} dropped for unverified numbers)` : ''}
+        ${r.faq_writer ? `<span class="muted"> · ${escapeHtml(r.faq_writer)}</span>` : ''}</dd>`);
+    if ((r.warnings || []).length) {
+        parts.push(`<dt>Notes</dt><dd class="warn-text">${listHtml(r.warnings, escapeHtml)}</dd>`);
+    }
+    parts.push(`<dt>Time</dt><dd>${r.duration_seconds ?? '—'} seconds</dd>`);
+    return `<div class="field"><label>How the AI trained on this document</label><dl class="report">${parts.join('')}</dl></div>`;
 }
 
 function renderDocuments(documents) {
@@ -413,26 +515,31 @@ function renderDocuments(documents) {
         list.innerHTML = '<div class="empty">No documents yet. Add your price list or menu above to train the bot.</div>';
         return;
     }
-    list.innerHTML = documents.map((doc) => `
+    const open = new Set([...list.querySelectorAll('.doc-body.open')].map((el) => el.id));
+    list.innerHTML = documents.map((doc) => {
+        const busy = TRAINING.has(doc.status);
+        return `
         <div class="doc ${doc.is_active ? '' : 'inactive'}">
             <div class="doc-head">
-                <div>
+                <div style="min-width:0;flex:1">
                     <div class="doc-title">${escapeHtml(doc.title)} ${typeBadge(doc)}</div>
                     <div class="doc-meta">
                         ${escapeHtml(doc.original_filename || 'pasted text')}
                         · ${doc.char_count.toLocaleString()} characters
                         ${doc.file_url ? `· <a href="${escapeHtml(doc.file_url)}" target="_blank" style="color:var(--accent)">open file</a>` : ''}
                     </div>
+                    <div id="status-${doc.id}">${statusHtml(doc)}</div>
                 </div>
                 <div class="doc-actions">
-                    <button class="btn btn-ghost btn-sm" data-act="toggleBody" data-id="${doc.id}"><i class="fa-solid fa-sliders"></i> Edit</button>
+                    <button class="btn btn-ghost btn-sm" data-act="toggleBody" data-id="${doc.id}"><i class="fa-solid fa-sliders"></i> Details</button>
                     <button class="btn btn-ghost btn-sm" data-act="toggleActive" data-id="${doc.id}" data-active="${doc.is_active}">
                         ${doc.is_active ? '<i class="fa-regular fa-eye-slash"></i> Turn off' : '<i class="fa-regular fa-eye"></i> Turn on'}
                     </button>
-                    <button class="btn btn-danger btn-sm" data-act="delete" data-id="${doc.id}" data-title="${escapeHtml(doc.title)}"><i class="fa-regular fa-trash-can"></i></button>
+                    <button class="btn btn-danger btn-sm" data-act="delete" data-id="${doc.id}" data-title="${escapeHtml(doc.title)}" ${busy ? 'disabled' : ''}><i class="fa-regular fa-trash-can"></i></button>
                 </div>
             </div>
-            <div class="doc-body" id="body-${doc.id}">
+            <div class="doc-body ${open.has('body-' + doc.id) ? 'open' : ''}" id="body-${doc.id}">
+                ${reportHtml(doc)}
                 <div class="field">
                     <label>Send this file when a customer says any of these (comma separated)</label>
                     <input class="form-control" id="kw-${doc.id}" value="${escapeHtml(doc.trigger_keywords)}">
@@ -443,20 +550,21 @@ function renderDocuments(documents) {
                 </div>
                 <div class="field">
                     <label>What the bot learned from this document (you can correct it)</label>
-                    <textarea class="form-control" id="sum-${doc.id}" style="min-height:190px">${escapeHtml(doc.summary)}</textarea>
+                    <textarea class="form-control" id="sum-${doc.id}" style="min-height:220px">${escapeHtml(doc.summary)}</textarea>
                 </div>
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-                    <button class="btn btn-primary btn-sm" data-act="save" data-id="${doc.id}"><i class="fa-solid fa-floppy-disk"></i> Save changes</button>
-                    ${doc.char_count ? `<button class="btn btn-ghost btn-sm" data-act="retrain" data-id="${doc.id}"><i class="fa-solid fa-rotate"></i> Re-read with AI</button>` : ''}
+                    <button class="btn btn-primary btn-sm" data-act="save" data-id="${doc.id}" ${busy ? 'disabled' : ''}><i class="fa-solid fa-floppy-disk"></i> Save changes</button>
+                    <button class="btn btn-ghost btn-sm" data-act="retrain" data-id="${doc.id}" ${busy ? 'disabled' : ''}><i class="fa-solid fa-rotate"></i> Retrain with AI</button>
                 </div>
             </div>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
 }
 
 $('docList').addEventListener('click', async (e) => {
-    const button = e.target.closest('button[data-act]');
+    const button = e.target.closest('[data-act]');
     if (!button) return;
+    e.preventDefault();
     const id = button.dataset.id;
     const act = button.dataset.act;
 
@@ -481,12 +589,14 @@ $('docList').addEventListener('click', async (e) => {
                     summary: $('sum-' + id).value
                 })
             });
+            document.activeElement.blur();
             toast('Saved. The bot uses this from the next message.');
             await loadDocuments();
         } else if (act === 'retrain') {
+            if (button.disabled) return;
             button.disabled = true;
             await api(`/api/tenants/${tenantId}/documents/${id}/retrain`, { method: 'POST' });
-            toast('Re-read with AI.');
+            toast('Retraining started — the bot keeps using the old version until it finishes.');
             await loadDocuments();
         } else if (act === 'delete') {
             if (!confirm(`Delete "${button.dataset.title}"? The bot will forget it immediately.`)) return;
@@ -497,17 +607,63 @@ $('docList').addEventListener('click', async (e) => {
     } catch (err) { toast(err.message, false); }
 });
 
+function isEditingDocs() {
+    const el = document.activeElement;
+    return !!el && $('docList').contains(el) && ['INPUT', 'TEXTAREA'].includes(el.tagName);
+}
+
 async function loadDocuments() {
+    const forTenant = tenantId;
     const data = await api(`/api/tenants/${tenantId}/documents`);
-    renderDocuments(data.documents);
+    if (forTenant !== tenantId) return;          // tenant switched while this was in flight
+
+    if (isEditingDocs()) {
+        // Don't wipe what the owner is typing: refresh only the status lines for now.
+        data.documents.forEach((d) => { const el = $('status-' + d.id); if (el) el.innerHTML = statusHtml(d); });
+        needsFullRender = true;
+    } else {
+        renderDocuments(data.documents);
+        needsFullRender = false;
+    }
+
     const active = data.documents.filter((d) => d.is_active).length;
     const sendable = data.documents.filter((d) => d.is_active && d.file_url && d.doc_type !== 'knowledge').length;
+    const training = data.documents.filter((d) => TRAINING.has(d.status)).length;
     $('docStats').innerHTML = `
         <div class="stat"><b>${data.documents.length}</b><span>documents</span></div>
         <div class="stat"><b>${active}</b><span>active</span></div>
         <div class="stat"><b>${sendable}</b><span>files the bot can send</span></div>
-        <div class="stat"><b>${data.knowledge_base_chars.toLocaleString()}</b><span>characters learned</span></div>`;
+        <div class="stat"><b>${data.knowledge_base_chars.toLocaleString()}</b><span>characters learned</span></div>
+        ${training ? `<div class="stat"><b>${training}</b><span>training now</span></div>` : ''}`;
     $('kbPreview').textContent = data.knowledge_base || '(empty)';
+
+    clearTimeout(pollTimer);
+    if (training || needsFullRender) {
+        pollTimer = setTimeout(() => loadDocuments().catch(() => {}), 3000);
+    }
+}
+
+// ---------- AI providers ----------
+async function loadProviders() {
+    try {
+        const data = await api('/api/ai/providers');
+        const names = { groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter', mistral: 'Mistral', openai: 'OpenAI' };
+        if (!data.providers.length) {
+            $('aiProviders').innerHTML = '<span class="chip paused"><i class="fa-solid fa-circle-exclamation"></i> No AI provider configured — add keys to .env</span>';
+            return;
+        }
+        $('aiProviders').innerHTML = '<span class="muted" style="font-size:0.78rem;margin-right:0.2rem">AI models working together:</span>' +
+            data.providers.map((p) => {
+                const name = names[p.name] || p.name;
+                // A paused KEY means the whole provider is out; a paused model is routine (others take over).
+                const keyPause = p.paused.find((x) => x.what.includes('#key'));
+                if (keyPause) {
+                    return `<span class="chip paused" title="${escapeHtml(keyPause.reason)}"><i class="fa-solid fa-pause"></i> ${name}: ${escapeHtml(keyPause.reason)}</span>`;
+                }
+                const busy = p.paused.length ? ` title="${p.paused.length} model(s) busy right now — others are covering"` : '';
+                return `<span class="chip ok"${busy}><i class="fa-solid fa-circle-check"></i> ${name}</span>`;
+            }).join('');
+    } catch (err) { /* status strip is informational only */ }
 }
 
 // ---------- profile ----------
@@ -589,7 +745,7 @@ $('tenantSelect').addEventListener('change', async (e) => {
 
 async function refresh() {
     if (!tenantId) return;
-    await Promise.all([loadDocuments(), loadProfile()]);
+    await Promise.all([loadDocuments(), loadProfile(), loadProviders()]);
 }
 
 async function boot() {

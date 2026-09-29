@@ -55,6 +55,12 @@ _COLUMN_MIGRATIONS = [
     ("tenants", "persona_template", "VARCHAR(50)"),
     ("tenants", "handoff_rules", "TEXT"),
     ("tenants", "quick_menu", "TEXT"),
+    ("tenant_documents", "status", "VARCHAR(20) NOT NULL DEFAULT 'ready'"),
+    ("tenant_documents", "training_stage", "TEXT"),
+    ("tenant_documents", "training_progress", "INTEGER NOT NULL DEFAULT 0"),
+    ("tenant_documents", "training_report", "TEXT"),
+    ("tenant_documents", "extraction_method", "VARCHAR(30)"),
+    ("tenant_documents", "public_path", "TEXT"),
 ]
 
 
