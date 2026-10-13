@@ -10,3 +10,6 @@ python-dotenv>=1.0.1
 fpdf2>=2.7.9
 python-multipart>=0.0.18
 stripe>=10.0.0
+
+pypdf>=4.0.0
+pytest>=8.0.0

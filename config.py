@@ -6,6 +6,13 @@ class Settings(BaseSettings):
     META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "my_secure_meta_verify_token_123")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./whatsapp_bot.db")
     META_GRAPH_API_VERSION: str = os.getenv("META_GRAPH_API_VERSION", "v20.0")
+    # App secret from the Meta app dashboard. When set, every webhook call must carry a valid
+    # X-Hub-Signature-256, so nobody but Meta can post fake customer messages.
+    META_APP_SECRET: str = ""
+    # WhatsApp access token and phone number ID for the tenant seeded on a brand-new database.
+    # Later tenants get theirs from the admin dashboard.
+    META_ACCESS_TOKEN: str = ""
+    SEED_PHONE_NUMBER_ID: str = "1157440684128924"
 
     # Bootstrap credentials for the FIRST owner account, only used the very first time
     # the server starts with an empty admin_users table. Change the password afterward

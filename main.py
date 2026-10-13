@@ -1,5 +1,7 @@
 import asyncio
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -109,16 +111,20 @@ async def lifespan(app: FastAPI):
     if interrupted:
         logger.warning(f"{interrupted} document training job(s) were interrupted by the restart.")
 
-    # Automatically seed Wasala Nature Resort tenant if not present
+    if not settings.META_APP_SECRET:
+        logger.warning("META_APP_SECRET is not set: webhook calls are NOT signature-checked.")
+    if settings.ADMIN_PASSWORD == "admin123":
+        logger.warning("ADMIN_PASSWORD is still the default: set your own in .env before going live.")
+
+    # Seed the first tenant (Wasala Nature Resort) on a brand-new database only. Its WhatsApp
+    # token comes from .env; an existing tenant's token is never touched here.
     async with AsyncSessionLocal() as session:
-        stmt = select(Tenant).where(Tenant.whatsapp_phone_number_id == "1157440684128924")
-        existing = (await session.execute(stmt)).scalar_one_or_none()
-        NEW_TOKEN = "EAAjfYY4wqiYBSWivwPb8V5cB6wbqZC0b2pLr6fjzTAuVqfU57FQc5V7fd4uYCZCFnzCUwHAF0sRqmQCnsAgjVnWrAsvLgHZAalZBwgRg2fONnit5IZBrx8Sdnyf91C8StvHrM5RBaPIzfQKJMgR3P3veTRi6gtfZA1jO38zUirUPdTpUjGRAxN7KGEZBSuuihrLsQZDZD"
-        if not existing:
+        tenant_count = (await session.execute(select(func.count(Tenant.id)))).scalar() or 0
+        if tenant_count == 0:
             wasala_tenant = Tenant(
                 business_name="Wasala Nature Resort - Banquet & Events",
-                whatsapp_phone_number_id="1157440684128924",
-                meta_access_token=NEW_TOKEN,
+                whatsapp_phone_number_id=settings.SEED_PHONE_NUMBER_ID,
+                meta_access_token=settings.META_ACCESS_TOKEN or "EAA_placeholder_set_META_ACCESS_TOKEN",
                 system_prompt=(
                     "You are the senior Banquet & Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. "
                     "Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices."
@@ -172,10 +178,6 @@ async def lifespan(app: FastAPI):
             session.add(wasala_tenant)
             await session.commit()
             logger.info("Successfully auto-seeded Wasala Nature Resort tenant into database!")
-        else:
-            existing.meta_access_token = NEW_TOKEN
-            await session.commit()
-            logger.info("Successfully updated Meta access token for existing tenant in database!")
 
         # Bootstrap the first owner admin account, only when no admin users exist yet.
         admin_count_stmt = select(func.count(AdminUser.id))
@@ -1012,8 +1014,13 @@ async def process_webhook(request: Request, background_tasks: BackgroundTasks):
     that aren't answered quickly, and an AI reply can take seconds on free-tier providers —
     processing inline risked customers receiving the same answer two or three times.
     """
+    raw_body = await request.body()
+    if settings.META_APP_SECRET:
+        expected = "sha256=" + hmac.new(settings.META_APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, request.headers.get("X-Hub-Signature-256", "")):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
     try:
-        body = await request.json()
+        body = json.loads(raw_body)
     except Exception as e:
         logger.error(f"Failed to parse incoming webhook JSON: {e}")
         return Response(content="EVENT_RECEIVED", status_code=200)

@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from database import AsyncSessionLocal, init_db
@@ -10,7 +11,7 @@ logger = logging.getLogger("onboard_banquet")
 async def onboard_banquet_tenant(
     business_name: str = "Wasala Nature Resort - Banquet & Events",
     whatsapp_phone_number_id: str = "1157440684128924",
-    meta_access_token: str = "EAAjfYY4wqiYBSFUDPvPZAcBBEdDXNI8bEAlvLqMGsALEtFAVKniNFPLU5jdOodS53bYOyOettApsQQIxflC0Ca4ywHRayUnbZBtnHfxiKJ5DJdEg5ZBsafyZBLrbw4byqJPhqJdAwPiCQiX2HqCAZCSUekdKcrqz2yiAzPPCNV3JECNZBXVNmZBx9CxsxSSxY54PZCGQStST56bFbEgggTCRFDkh5HWg8MbO5ECctF2SPeVpSZAXETkg3e2p608BdizzYKkWnREDXAoPTydVgJWNWZCIQG",
+    meta_access_token: str = os.getenv("META_ACCESS_TOKEN", "EAA_placeholder_set_META_ACCESS_TOKEN"),
     human_handoff_number: str = "+94779998877"
 ):
     """

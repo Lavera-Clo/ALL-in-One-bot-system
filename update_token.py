@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from database import AsyncSessionLocal
@@ -7,7 +8,7 @@ from sqlalchemy import select
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("update_token")
 
-TOKEN = "EAAjfYY4wqiYBSWivwPb8V5cB6wbqZC0b2pLr6fjzTAuVqfU57FQc5V7fd4uYCZCFnzCUwHAF0sRqmQCnsAgjVnWrAsvLgHZAalZBwgRg2fONnit5IZBrx8Sdnyf91C8StvHrM5RBaPIzfQKJMgR3P3veTRi6gtfZA1jO38zUirUPdTpUjGRAxN7KGEZBSuuihrLsQZDZD"
+TOKEN = os.getenv("META_ACCESS_TOKEN", "")  # set in .env, never in code
 PHONE_ID = "1157440684128924"
 
 async def update_token():
