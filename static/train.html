@@ -299,7 +299,7 @@ let tenantId = null;
 let profileTemplates = [];
 
 const $ = (id) => document.getElementById(id);
-const getToken = () => "bypass-token";
+const getToken = () => sessionStorage.getItem(TOKEN_KEY);
 
 function toast(message, ok = true) {
     const el = $('toast');
@@ -762,7 +762,7 @@ async function boot() {
 }
 
 (async () => {
-    // LOGIN PORTAL REMOVED: Auto bypass
+    if (!getToken()) { showLogin(); return; }
     showPortal();
     await boot();
 })();

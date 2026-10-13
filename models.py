@@ -113,6 +113,26 @@ class ChatHistory(Base):
         return f"<ChatHistory(tenant_id={self.tenant_id}, customer='{self.customer_phone_number}', role='{self.role}')>"
 
 
+class BotQACache(Base):
+    __tablename__ = "bot_qa_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    positive_signals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    negative_signals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+
+    def __repr__(self) -> str:
+        return f"<BotQACache(id={self.id}, tenant_id={self.tenant_id}, question='{self.question[:20]}')>"
+
+
 class Product(Base):
     __tablename__ = "products"
 

@@ -103,6 +103,15 @@ DEFAULT_ROLES: Dict[str, List[str]] = {
         "mistral:mistral-medium-latest",
         "openai:gpt-4o",
     ],
+    # Looking at photos: payment receipts, product pictures. (Groq has no vision model on this key.)
+    "vision": [
+        "gemini:gemini-flash-lite-latest",
+        "gemini:gemini-flash-latest",
+        "gemini:gemini-3.1-flash-lite",
+        "openrouter:google/gemma-4-31b-it:free",
+        "mistral:mistral-small-latest",
+        "openai:gpt-4o-mini",
+    ],
     # Small jobs: titles, keywords, captions.
     "fast": [
         "groq:openai/gpt-oss-20b",
@@ -366,13 +375,16 @@ async def _try_candidate(provider: str, model: str, messages: List[Dict], max_to
 
 async def complete(role: str, messages: List[Dict], *, max_tokens: int = 1500, temperature: float = 0.3,
                    timeout: float = 90.0, exclude_providers: Optional[set] = None,
-                   only_providers: Optional[set] = None, patient: Optional[bool] = None) -> LLMResult:
+                   only_providers: Optional[set] = None, patient: Optional[bool] = None,
+                   exclude_models: Optional[set] = None) -> LLMResult:
     """Run a job on the first candidate that works. Chat defaults to impatient (see _run_candidate)."""
     if patient is None:
         patient = role != "chat"
     attempts: List[str] = []
     for provider, model in role_candidates(role):
         if exclude_providers and provider in exclude_providers:
+            continue
+        if exclude_models and f"{provider}/{model}" in exclude_models:
             continue
         if only_providers and provider not in only_providers:
             continue
@@ -428,9 +440,27 @@ def parse_json(text: str):
     raise ValueError("no JSON found in model reply")
 
 
+def image_mime(data: bytes) -> str:
+    """Detect the image type from its first bytes (WhatsApp sends JPEG, PNG or WebP)."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def image_message(prompt: str, image_bytes: bytes) -> List[Dict]:
+    """One user message holding a prompt and an image, in the OpenAI format all providers accept."""
+    data_url = f"data:{image_mime(image_bytes)};base64,{base64.b64encode(image_bytes).decode()}"
+    return [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ]}]
+
+
 async def complete_json(role: str, messages: List[Dict], **kwargs):
     """Like complete(), but moves on to the next candidate if a model returns unparseable JSON."""
-    tried: set = set()
+    tried: set = set(kwargs.pop("exclude_providers", None) or ())
     last_error = ""
     for _ in range(3):
         result = await complete(role, messages, exclude_providers=tried or None, **kwargs)

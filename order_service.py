@@ -131,6 +131,19 @@ async def process_receipt_upload(
         amount_str = f"Rs.{analysis['amount']:,.2f}" if analysis.get("amount") else "Unknown"
         ref_str = analysis.get("reference_number") or "N/A"
         confidence_str = analysis.get("confidence", "unknown")
+        if analysis.get("amount_confirmed_by_two_readers"):
+            confidence_str += " (2 AI models agree)"
+
+        # Do the comparison for the manager instead of leaving it to a glance at a phone.
+        detected = analysis.get("amount")
+        if detected is None:
+            match_line = "⚠️ Amount could not be read — please check the receipt."
+        elif abs(detected - order.total_amount) < 1:
+            match_line = "✅ Matches the order total."
+        elif detected < order.total_amount:
+            match_line = f"⚠️ Rs.{order.total_amount - detected:,.2f} LESS than the order total."
+        else:
+            match_line = f"ℹ️ Rs.{detected - order.total_amount:,.2f} more than the order total."
 
         manager_msg = (
             f"💰 *NEW PAYMENT RECEIPT UPLOADED*\n\n"
@@ -140,6 +153,7 @@ async def process_receipt_upload(
             f"💵 Order Total: Rs.{order.total_amount:,.2f}\n\n"
             f"🏦 *AI Receipt Analysis:*\n"
             f"• Amount Detected: {amount_str}\n"
+            f"• {match_line}\n"
             f"• Reference #: {ref_str}\n"
             f"• Confidence: {confidence_str}\n"
             f"• Summary: {analysis.get('summary', 'N/A')}\n\n"

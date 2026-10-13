@@ -767,69 +767,41 @@ async def generate_ai_response(
 
 async def classify_product_from_image(image_bytes: bytes, products: list) -> dict:
     """
-    Uses GPT-4o Vision to identify which product from the catalog is shown in an image.
-    Returns {"matched": bool, "product_name": str|None, "confidence": str}
-    Falls back to {"matched": False} if no API key is configured.
+    Identify which catalog product a customer's photo shows, using the vision models in
+    llm_router (Gemini first). Returns {"matched": bool, "product_name": str|None, "confidence": str}.
+
+    The model may only answer with a name from the catalog; anything else counts as no match,
+    so a confident-sounding invented product can never reach the cart.
     """
-    api_key = settings.OPENAI_API_KEY.strip() if settings.OPENAI_API_KEY else ""
-    if not api_key or "placeholder" in api_key or api_key == "your_openai_api_key_here":
+    if not products or not image_bytes or not llm_router.role_candidates("vision"):
         return {"matched": False, "product_name": None, "confidence": "none"}
 
-    if not products:
-        return {"matched": False, "product_name": None, "confidence": "none"}
-
-    product_list_str = "\n".join(f"- {p.name}" for p in products)
-
+    names = [p.name for p in products]
+    product_list_str = "\n".join(f"- {name}" for name in names)
     prompt = f"""You are a product identification assistant for an online store.
 Look at this image and identify which product it shows.
 
 Available products in our catalog:
 {product_list_str}
 
-Respond with ONLY a JSON object (no markdown):
-{{
-    "matched_product": "<exact product name from the list above, or null if no match>",
-    "confidence": "high" | "medium" | "low"
-}}
+Respond with ONLY a JSON object:
+{{"matched_product": "<exact product name from the list above, or null>", "confidence": "high" | "medium" | "low"}}
 
-Rules:
-- matched_product must be an exact name from the list, or null
-- Use null if the image doesn't clearly match any product
-"""
+Use null if the image doesn't clearly show one of these products."""
 
     try:
-        client = AsyncOpenAI(api_key=api_key)
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}",
-                        "detail": "low"
-                    }}
-                ]
-            }],
-            max_tokens=150,
-            temperature=0.1
-        )
-
-        reply = response.choices[0].message.content.strip()
-        if reply.startswith("```"):
-            lines = reply.split("\n")
-            reply = "\n".join(lines[1:-1]) if len(lines) > 2 else reply.strip("`")
-
-        result = json.loads(reply)
-        matched_name = result.get("matched_product")
-        return {
-            "matched": matched_name is not None,
-            "product_name": matched_name,
-            "confidence": result.get("confidence", "low")
-        }
-
-    except Exception as e:
-        logger.error(f"classify_product_from_image error: {e}")
+        result, by = await llm_router.complete_json(
+            "vision", llm_router.image_message(prompt, image_bytes), max_tokens=400, temperature=0)
+    except llm_router.LLMUnavailable as e:
+        logger.error(f"classify_product_from_image unavailable: {e}")
         return {"matched": False, "product_name": None, "confidence": "none"}
+
+    answer = (result.get("matched_product") or "").strip() if isinstance(result, dict) else ""
+    # Accept only real catalog names (case-insensitive), never an invented one.
+    exact = next((n for n in names if n.lower() == answer.lower()), None)
+    logger.info(f"[vision] product photo -> {exact!r} by {by.label}")
+    return {
+        "matched": exact is not None,
+        "product_name": exact,
+        "confidence": result.get("confidence", "low") if exact else "none",
+    }

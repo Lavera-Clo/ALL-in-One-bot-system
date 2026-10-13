@@ -362,7 +362,7 @@
         const API_BASE = `/api/tenants/${TENANT_ID}`;
 
         // ===== AUTH =====
-        function getToken() { return "bypass-token"; }
+        function getToken() { return sessionStorage.getItem('adminToken'); }
 
         async function authFetch(url, options = {}) {
             const token = getToken();
@@ -903,9 +903,13 @@
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            // LOGIN PORTAL REMOVED: Auto bypass login
-            document.getElementById('loginOverlay').style.display = 'none';
-            afterLogin();
+            // Signed in already (e.g. from another page)? Go straight in; any 401 brings the login back.
+            if (getToken()) {
+                document.getElementById('loginOverlay').style.display = 'none';
+                afterLogin();
+            } else {
+                showLoginOverlay();
+            }
         });
     </script>
 </body>

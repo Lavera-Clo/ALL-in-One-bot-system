@@ -2,51 +2,41 @@ import os
 import io
 import uuid
 from fpdf import FPDF
-from openai import AsyncOpenAI
+import llm_router
 from config import settings
 
 async def generate_business_ideas(stock_details: str) -> str:
     """
-    Calls OpenAI to generate business ideas based on provided stock details.
+    Generate business ideas from a stock/inventory description, through llm_router
+    (Groq / Gemini / OpenRouter...), so it works without an OpenAI key.
     """
-    api_key = settings.OPENAI_API_KEY.strip() if settings.OPENAI_API_KEY else ""
-    if not api_key or "placeholder" in api_key or api_key == "your_openai_api_key_here":
-         return (
-             "Mock Business Ideas (No OpenAI API Key found):\n\n"
-             "1. Furniture Rental Service\n"
-             "   Rent out your wooden chairs and round tables for local weddings and events.\n\n"
-             "2. Antique Restoration & Resale\n"
-             "   Refurbish the vintage chandeliers and sell them to luxury interior designers.\n\n"
-             "3. Pop-up Event Venue\n"
-             "   Use the tables and chairs to host a temporary pop-up cafe or art exhibit.\n\n"
-             "(Please add your OPENAI_API_KEY to the .env file to generate real ideas based on your stock.)"
-         )
-    
-    client = AsyncOpenAI(api_key=api_key)
-    
-    prompt = f"""
-You are an expert business consultant. A client has provided the following stock/inventory details:
+    if not llm_router.role_candidates("judge"):
+        return ("No AI provider is configured, so ideas can't be generated yet.\n\n"
+                "Add GEMINI_API_KEY, GROQ_API_KEY or OPENROUTER_API_KEY to the .env file.")
 
-{stock_details}
+    prompt = f"""You are an expert business consultant in Sri Lanka. A client has this stock/inventory:
 
-Based on this inventory, generate 3 to 5 creative and actionable business ideas or strategies to monetize this stock. 
-For each idea, provide a clear title and a brief description of how to execute it.
-Please format the response in clean plain text (avoid markdown bolding/asterisks if possible, to make it easier for a PDF generator).
-"""
-    
+{stock_details[:12000]}
+
+Generate 3 to 5 creative, practical business ideas or strategies to make money from THIS stock.
+For each idea give:
+- a clear title
+- who the customers are
+- how to start this month, in 3-4 concrete steps
+- the main risk to watch
+
+Write plain text only - no markdown, no asterisks, no tables (it is printed to a PDF).
+Do not invent prices or market statistics you don't know; describe how to check them instead."""
+
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful business consultant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=800
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error generating business ideas: {str(e)}"
+        result = await llm_router.complete("judge", [
+            {"role": "system", "content": "You are a practical, honest small-business consultant."},
+            {"role": "user", "content": prompt},
+        ], max_tokens=3000, temperature=0.7)
+        return result.text.strip()
+    except llm_router.LLMUnavailable as e:
+        return f"Error generating business ideas: {e}"
+
 
 def create_pdf_from_text(text: str) -> bytes:
     """

@@ -47,7 +47,7 @@ from schemas import (
     BotPreviewRequest
 )
 from ai_service import (
-    generate_ai_response, get_pdfs_for_user_message, resolve_reply_documents,
+    generate_ai_response, get_pdfs_for_user_message, resolve_reply_documents, DOC_REQUEST_WORDS,
     transcribe_audio, classify_product_from_image,
 )
 from whatsapp_client import (
@@ -88,6 +88,8 @@ from payment_service import stripe_is_configured, create_payment_link, verify_an
 from invoice_service import generate_invoice_pdf
 from realtime import manager as ws_manager
 from rate_limit import RateLimitMiddleware
+from bot_profile_generator import generate_bot_profile
+from bot_learning import get_cached_answer, cache_qa_pair, record_signal, get_learning_stats
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO)
@@ -260,6 +262,32 @@ def seen_before(message_id: Optional[str]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Follow-up throttle: stops the bot repeating the same PDF / menu to one customer.
+# Measured before: 3 questions in a minute produced 11 WhatsApp messages, including the
+# same price-list PDF three times. People mute or block that, and Meta lowers the number's
+# quality rating when they do.
+# ---------------------------------------------------------------------------
+_RECENT_SENDS: dict = {}
+
+
+def sent_recently(customer: str, what: str, within_seconds: int) -> bool:
+    sent_at = _RECENT_SENDS.get((customer, what))
+    return sent_at is not None and datetime.now(timezone.utc).timestamp() - sent_at < within_seconds
+
+
+def mark_sent(customer: str, what: str) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    if len(_RECENT_SENDS) > 5000:
+        for key in [k for k, t in _RECENT_SENDS.items() if now - t > 86400]:
+            _RECENT_SENDS.pop(key, None)
+    _RECENT_SENDS[(customer, what)] = now
+
+
+DOC_RESEND_SECONDS = 6 * 3600
+MAIN_MENU_RESEND_SECONDS = 30 * 60
+
+
 # Mount static folder for serving PDFs, images, and admin interface
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -288,9 +316,15 @@ async def get_current_admin(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db)
 ) -> AdminUser:
-    """FastAPI dependency: Bypassed login - Always returns owner admin."""
-    # BYPASS LOGIN PORTAL: Return a dummy admin user instantly
-    return AdminUser(id=1, username="admin", role="owner", is_active=True)
+    """FastAPI dependency: validates the Bearer session token and returns the logged-in admin."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    admin = await get_admin_from_token(token, db)
+    if not admin:
+        raise HTTPException(status_code=401, detail="Session expired or invalid — please log in again")
+    return admin
 
 
 async def require_owner(admin: AdminUser = Depends(get_current_admin)) -> AdminUser:
@@ -302,8 +336,15 @@ async def require_owner(admin: AdminUser = Depends(get_current_admin)) -> AdminU
 
 async def get_admin_from_token(token: str, db: AsyncSession) -> Optional[AdminUser]:
     """Same validation as get_current_admin, but for contexts without a Header (e.g. WebSocket query param)."""
-    # BYPASS LOGIN PORTAL: Always return owner admin
-    return AdminUser(id=1, username="admin", role="owner", is_active=True)
+    if not token:
+        return None
+    stmt = select(AdminSession).where(AdminSession.token == token)
+    admin_session = (await db.execute(stmt)).scalar_one_or_none()
+    if not admin_session or _is_expired(admin_session.expires_at):
+        return None
+
+    user_stmt = select(AdminUser).where(AdminUser.id == admin_session.admin_user_id, AdminUser.is_active == True)  # noqa: E712
+    return (await db.execute(user_stmt)).scalar_one_or_none()
 
 
 @app.post("/api/admin/login", tags=["Admin Auth"])
@@ -588,6 +629,9 @@ async def update_bot_profile(
 
     await db.commit()
     await db.refresh(tenant)
+    # Cached answers may quote the old phone numbers or handoff rules.
+    from bot_learning import clear_tenant_cache
+    await clear_tenant_cache(db, tenant.id)
     logger.info(f"Tenant {tenant.id}: bot profile updated by {admin.username}.")
     return {"message": "Bot profile updated."}
 
@@ -792,6 +836,97 @@ async def preview_bot_reply(
     return {"reply": reply, "handoff": is_handoff, "attachments": attachments}
 
 
+# ---------------------------------------------------------------------------
+# Auto Bot Profile Generator & Self-Learning ML
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tenants/{tenant_id}/auto-profile", tags=["Bot Profile"])
+async def auto_generate_bot_profile(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """
+    Analyzes the tenant's knowledge base and auto-generates a complete bot profile:
+    bot name, persona, system prompt, handoff rules, quick menu, greeting style, and currency.
+    Optionally applies the profile to the tenant row.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    kb = tenant.knowledge_base or ""
+    if not kb.strip() or kb.strip() == "No business documentation has been uploaded yet.":
+        raise HTTPException(status_code=400, detail="Upload at least one business document before generating a profile.")
+
+    profile = await generate_bot_profile(kb, business_name_hint=tenant.business_name)
+
+    # Auto-apply the profile to the tenant
+    tenant.bot_name = profile.bot_name
+    tenant.bot_role_title = profile.bot_role_title
+    tenant.persona_template = profile.persona_template
+    tenant.system_prompt = profile.system_prompt
+    tenant.handoff_rules = profile.handoff_rules
+    tenant.quick_menu = profile.quick_menu
+    tenant.currency = profile.currency
+    await db.commit()
+    from bot_learning import clear_tenant_cache
+    await clear_tenant_cache(db, tenant.id)     # answers cached under the old persona/rules
+
+    return {
+        "message": "Bot profile auto-generated and applied!",
+        "profile": {
+            "business_name": profile.business_name,
+            "business_type": profile.business_type,
+            "bot_name": profile.bot_name,
+            "bot_role_title": profile.bot_role_title,
+            "persona_template": profile.persona_template,
+            "system_prompt": profile.system_prompt,
+            "handoff_rules": profile.handoff_rules,
+            "quick_menu": profile.quick_menu,
+            "greeting_style": profile.greeting_style,
+            "currency": profile.currency,
+        }
+    }
+
+
+@app.get("/api/tenants/{tenant_id}/learning-stats", tags=["Bot Learning"])
+async def get_bot_learning_stats(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Returns self-learning ML statistics for this tenant's bot."""
+    await _get_tenant_or_404(db, tenant_id)
+    stats = await get_learning_stats(db, tenant_id)
+    return stats
+
+
+@app.get("/api/tenants/{tenant_id}/qa-cache", tags=["Bot Learning"])
+async def get_bot_qa_cache(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Returns all cached Q&A pairs the bot has learned for this tenant."""
+    await _get_tenant_or_404(db, tenant_id)
+    from models import BotQACache
+    stmt = select(BotQACache).where(BotQACache.tenant_id == tenant_id).order_by(BotQACache.use_count.desc())
+    result = await db.execute(stmt)
+    caches = result.scalars().all()
+    return {
+        "total": len(caches),
+        "pairs": [
+            {
+                "id": c.id,
+                "question": c.question,
+                "answer": c.answer,
+                "use_count": c.use_count,
+                "positive_signals": c.positive_signals,
+                "negative_signals": c.negative_signals,
+                "created_at": str(c.created_at),
+            }
+            for c in caches
+        ]
+    }
+
 @app.post("/api/tenants/{tenant_id}/train", tags=["Knowledge Base Trainer"], deprecated=True)
 async def train_bot_knowledge_base(
     tenant_id: int,
@@ -869,11 +1004,13 @@ async def verify_webhook(
 
 
 @app.post("/webhook", tags=["WhatsApp Webhook"])
-async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+async def process_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Receives incoming WhatsApp events from Meta Graph API.
-    Resolves tenant via phone_number_id, processes message with OpenAI gpt-4o-mini,
-    and sends response back via Meta Graph API.
+
+    Acknowledges IMMEDIATELY and does the work in the background. Meta re-delivers webhooks
+    that aren't answered quickly, and an AI reply can take seconds on free-tier providers —
+    processing inline risked customers receiving the same answer two or three times.
     """
     try:
         body = await request.json()
@@ -881,6 +1018,50 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         logger.error(f"Failed to parse incoming webhook JSON: {e}")
         return Response(content="EVENT_RECEIVED", status_code=200)
 
+    background_tasks.add_task(_process_webhook_in_background, body)
+    return Response(content="EVENT_RECEIVED", status_code=200)
+
+
+# One lock per customer, so "hi" and "price?" sent a second apart are answered in order.
+_customer_locks: dict = {}
+
+
+def _webhook_customer_key(body: dict) -> Optional[str]:
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for message in value.get("messages", []) or []:
+                if message.get("from"):
+                    return f"{value.get('metadata', {}).get('phone_number_id')}:{message['from']}"
+    return None
+
+
+async def _process_webhook_in_background(body: dict) -> None:
+    """Runs after Meta already got its 200. Uses its own DB session (the request's is closed)."""
+    key = _webhook_customer_key(body)
+    slot = None
+    if key:
+        # [lock, users]: the lock is dropped only when no task holds or waits for it.
+        slot = _customer_locks.setdefault(key, [asyncio.Lock(), 0])
+        slot[1] += 1
+    try:
+        async with AsyncSessionLocal() as db:
+            if slot:
+                async with slot[0]:
+                    await _handle_webhook_body(body, db)
+            else:
+                await _handle_webhook_body(body, db)    # delivery/read receipts: no ordering needed
+    except Exception:
+        logger.exception("Background webhook processing failed")
+    finally:
+        if slot:
+            slot[1] -= 1
+            if slot[1] == 0:
+                _customer_locks.pop(key, None)
+
+
+async def _handle_webhook_body(body: dict, db: AsyncSession):
+    """Processes one webhook payload: resolves the tenant, replies to each message."""
     logger.info(f"Incoming Webhook Payload: {body}")
 
     # Extract entry data
@@ -1437,6 +1618,16 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     db.add(ai_history)
                     await db.commit()
 
+                    # Self-learning: cache the Q&A pair for future fuzzy matching
+                    try:
+                        await cache_qa_pair(db, tenant.id, user_text, ai_reply)
+                        if is_handoff_requested:
+                            await record_signal(db, tenant.id, user_text, is_positive=False)
+                        else:
+                            await record_signal(db, tenant.id, user_text, is_positive=True)
+                    except Exception:
+                        pass  # learning is best-effort, never block the reply
+
                     # Send AI response back to customer via Meta Cloud API
                     await send_whatsapp_message(
                         phone_number_id=tenant.whatsapp_phone_number_id,
@@ -1445,9 +1636,16 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         meta_access_token=tenant.meta_access_token
                     )
 
-                    # Send attached PDF document(s)
+                    # Send attached PDF document(s) — but not one this customer received in the
+                    # last few hours, unless they explicitly asked for a file again.
+                    asked_for_file = any(w in user_text.lower() for w in DOC_REQUEST_WORDS)
+                    docs_to_send = [
+                        d for d in docs_to_send
+                        if asked_for_file or not sent_recently(customer_phone, f"doc:{d.get('url')}", DOC_RESEND_SECONDS)
+                    ]
                     for doc_info in docs_to_send:
                         if doc_info and doc_info.get("url"):
+                            mark_sent(customer_phone, f"doc:{doc_info['url']}")
                             logger.info(f"Sending PDF document to {customer_phone}: {doc_info['filename']} from URL {doc_info['url']}")
                             try:
                                 doc_res = await send_whatsapp_document(
@@ -1474,7 +1672,11 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     interactive_sent = False
 
                     # Quick Reply Buttons (Trigger on greetings or general main menu requests)
-                    should_send_quick_buttons = is_pure_greeting or any(w in msg_lower for w in ["option", "options", "help", "menu", "start", "main menu"])
+                    # Only for a greeting or a SHORT menu request ("menu", "options", "help") — not when
+                    # "menu" appears inside a question like "Silver menu for 150 guests?".
+                    is_menu_request = len(msg_lower.split()) <= 3 and any(
+                        w in msg_lower for w in ["option", "options", "help", "menu", "start", "main menu"])
+                    should_send_quick_buttons = is_pure_greeting or is_menu_request
 
                     if should_send_quick_buttons:
                         interactive_sent = True
@@ -1504,7 +1706,8 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         # used in their own menu titles.
                         menu_words = {w for row in quick_menu_rows for w in row["title"].lower().split() if len(w) > 3}
                         generic_triggers = ["option", "options", "view prices", "view menus", "package", "packages", "capacity"]
-                        if any(w in msg_lower for w in generic_triggers) or any(w in msg_lower for w in menu_words):
+                        is_short = len(msg_lower.split()) <= 4      # long specific questions get an answer, not a list
+                        if is_short and (any(w in msg_lower for w in generic_triggers) or any(w in msg_lower for w in menu_words)):
                             interactive_sent = True
                             list_sections = [{"title": (tenant.business_name or "Options")[:24], "rows": quick_menu_rows}]
                             try:
@@ -1552,9 +1755,10 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     # PERSISTENT MAIN MENU (shown after replies with no other
                     # interactive follow-up, only for tenants that sell products)
                     # -----------------------------------------------------------
-                    if not interactive_sent:
+                    if not interactive_sent and not sent_recently(customer_phone, "main_menu", MAIN_MENU_RESEND_SECONDS):
                         active_products = await get_active_products(db, tenant.id)
                         if active_products:
+                            mark_sent(customer_phone, "main_menu")
                             menu_buttons = [
                                 {"id": "btn_shop", "title": "🛍️ Shop"},
                                 {"id": "btn_cart", "title": "🛒 My Cart"},
@@ -1583,9 +1787,6 @@ async def process_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         )
                 except Exception as msg_err:
                     logger.error(f"Error processing message from {customer_phone}: {msg_err}")
-
-    # Meta requires a 200 OK HTTP response to acknowledge receipt of event
-    return Response(content="EVENT_RECEIVED", status_code=200)
 
 
 # ---------------------------------------------------------------------------

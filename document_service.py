@@ -113,8 +113,13 @@ async def rebuild_knowledge_base(db: AsyncSession, tenant: Tenant) -> str:
     from wiping another.
     """
     documents = await get_tenant_documents(db, tenant.id)
+    previous = tenant.knowledge_base
     tenant.knowledge_base = compose_knowledge_base(documents)
     await db.commit()
+    if tenant.knowledge_base != previous:
+        # Cached answers were built from the old knowledge (old prices) — forget them.
+        from bot_learning import clear_tenant_cache
+        await clear_tenant_cache(db, tenant.id)
     await db.refresh(tenant)
     return tenant.knowledge_base
 

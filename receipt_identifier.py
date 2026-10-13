@@ -1,43 +1,23 @@
+"""
+Reads a customer's bank-transfer receipt (photo or screenshot) with AI vision.
+
+The result is ADVISORY: the order moves to 'payment_uploaded' and the manager must still reply
+CONFIRM — nothing here approves a payment by itself.
+
+Two different vision models read every receipt independently. If they disagree on the amount,
+confidence is forced to 'low' and the summary says so, so the manager looks closely. A misread
+amount is exactly the mistake a manager glancing at a phone would otherwise miss.
+"""
+
 import logging
-import json
-import base64
-from openai import AsyncOpenAI
-from config import settings
+from typing import Optional
+
+import llm_router as llm
 
 logger = logging.getLogger("uvicorn.error")
 
-
-async def analyze_bank_receipt(image_bytes: bytes) -> dict:
-    """
-    Analyzes a bank transfer receipt image using OpenAI GPT-4o Vision API.
-    Extracts: amount, reference number, sender name, date, bank name.
-    Returns a structured dict with extracted data.
-    """
-    api_key = settings.OPENAI_API_KEY.strip() if settings.OPENAI_API_KEY else ""
-
-    # Fallback if no valid API key
-    if not api_key or "placeholder" in api_key or api_key == "your_openai_api_key_here":
-        logger.warning("No valid OpenAI API key for receipt analysis. Marking for manual review.")
-        return {
-            "success": False,
-            "amount": None,
-            "reference_number": None,
-            "sender_name": None,
-            "date": None,
-            "bank_name": None,
-            "summary": "Receipt uploaded — awaiting manual review (no AI key configured).",
-            "confidence": "none"
-        }
-
-    try:
-        client = AsyncOpenAI(api_key=api_key)
-
-        # Convert image bytes to base64 for the Vision API
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-        prompt = """
-You are analyzing a bank transfer receipt or payment screenshot. 
-Extract the following information and return it as a JSON object:
+RECEIPT_PROMPT = """You are analyzing a bank transfer receipt or payment screenshot.
+Return ONLY a JSON object:
 
 {
     "amount": <number or null>,
@@ -46,74 +26,100 @@ Extract the following information and return it as a JSON object:
     "date": "<string or null>",
     "bank_name": "<string or null>",
     "summary": "<brief one-line summary of the payment>",
-    "confidence": "high" | "medium" | "low"
+    "confidence": "high" | "medium" | "low",
+    "is_receipt": true | false
 }
 
 Rules:
-- "amount" must be a number (no currency symbols). If you see "Rs. 12,500.00", return 12500.00
-- If you can't read a field clearly, set it to null
-- "confidence" reflects how clearly you can read the receipt
-- Look for transaction IDs, reference numbers, UTR numbers, or any unique identifier
-- The receipt may be in English, Sinhala, or Tamil
-- Return ONLY the JSON object, no other text
-"""
+- "amount" is the TRANSFERRED amount as a number, no currency symbols ("Rs. 12,500.00" -> 12500.00).
+  Not an account balance, not a fee.
+- If you can't read a field clearly, set it to null. Never guess digits.
+- "confidence" reflects how clearly you can read the receipt.
+- Look for transaction IDs, reference numbers, UTR numbers or any unique identifier.
+- The receipt may be in English, Sinhala or Tamil.
+- "is_receipt" is false if the image is not a payment receipt at all (a selfie, a product photo...)."""
 
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}",
-                                "detail": "high"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=500,
-            temperature=0.1
-        )
 
-        reply = response.choices[0].message.content.strip()
+def _failed(summary: str) -> dict:
+    return {
+        "success": False,
+        "amount": None,
+        "reference_number": None,
+        "sender_name": None,
+        "date": None,
+        "bank_name": None,
+        "summary": summary,
+        "confidence": "none",
+    }
 
-        # Clean markdown code fences if present
-        if reply.startswith("```"):
-            reply = reply.split("\n", 1)[1] if "\n" in reply else reply[3:]
-            if reply.endswith("```"):
-                reply = reply[:-3]
-            reply = reply.strip()
 
-        result = json.loads(reply)
-        result["success"] = True
-        logger.info(f"Receipt analysis result: {result}")
+def _as_amount(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(float(str(value).replace(",", "").replace("Rs.", "").replace("Rs", "").strip()), 2)
+    except ValueError:
+        return None
+
+
+async def analyze_bank_receipt(image_bytes: bytes) -> dict:
+    """
+    Extract amount, reference number, sender, date and bank from a receipt image.
+    Always returns the same dict shape; on failure `success` is False and the summary says why.
+    """
+    if not image_bytes:
+        return _failed("Receipt uploaded but the image was empty. Manual review required.")
+    if not llm.role_candidates("vision"):
+        logger.warning("No vision-capable AI provider configured for receipt analysis.")
+        return _failed("Receipt uploaded — awaiting manual review (no AI vision provider configured).")
+
+    messages = llm.image_message(RECEIPT_PROMPT, image_bytes)
+    try:
+        first, first_by = await llm.complete_json("vision", messages, max_tokens=800, temperature=0)
+    except llm.LLMUnavailable as e:
+        logger.error(f"Receipt analysis unavailable: {e}")
+        return _failed("Receipt uploaded but no AI model could read it right now. Manual review required.")
+
+    if not isinstance(first, dict):
+        return _failed("Receipt uploaded but AI could not parse it. Manual review required.")
+
+    result = dict(first)
+    result["amount"] = _as_amount(first.get("amount"))
+    result["success"] = True
+    result["read_by"] = [first_by.label]
+
+    if first.get("is_receipt") is False:
+        result["confidence"] = "low"
+        result["summary"] = "This image does not look like a payment receipt. " + (first.get("summary") or "")
         return result
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse receipt analysis JSON: {e}")
-        return {
-            "success": False,
-            "amount": None,
-            "reference_number": None,
-            "sender_name": None,
-            "date": None,
-            "bank_name": None,
-            "summary": "Receipt uploaded but AI could not parse it. Manual review required.",
-            "confidence": "none"
-        }
-    except Exception as e:
-        logger.error(f"Error analyzing receipt with GPT-4o Vision: {e}")
-        return {
-            "success": False,
-            "amount": None,
-            "reference_number": None,
-            "sender_name": None,
-            "date": None,
-            "bank_name": None,
-            "summary": f"Receipt analysis failed: {str(e)}",
-            "confidence": "none"
-        }
+    # Second, independent reading: a different company's model if one is free, otherwise at
+    # least a different model from the same company.
+    try:
+        try:
+            second, second_by = await llm.complete_json(
+                "vision", messages, max_tokens=800, temperature=0, exclude_providers={first_by.provider})
+        except llm.LLMUnavailable:
+            second, second_by = await llm.complete_json(
+                "vision", messages, max_tokens=800, temperature=0, exclude_models={first_by.label})
+        result["read_by"].append(second_by.label)
+        second_amount = _as_amount(second.get("amount")) if isinstance(second, dict) else None
+        if result["amount"] is not None and second_amount is not None and abs(result["amount"] - second_amount) >= 1:
+            result["confidence"] = "low"
+            result["amount_alternatives"] = [result["amount"], second_amount]
+            result["summary"] = (f"⚠️ Two AI readers disagree on the amount ({result['amount']:,.2f} vs "
+                                 f"{second_amount:,.2f}) — check the receipt. " + (result.get("summary") or ""))
+        elif result["amount"] is None and second_amount is not None:
+            result["amount"] = second_amount
+            result["confidence"] = "low"
+        else:
+            result["amount_confirmed_by_two_readers"] = result["amount"] is not None
+        if not result.get("reference_number") and isinstance(second, dict):
+            result["reference_number"] = second.get("reference_number")
+    except llm.LLMUnavailable:
+        result["amount_confirmed_by_two_readers"] = False
+        if result.get("confidence") == "high":
+            result["confidence"] = "medium"     # a single reading is never 'high'
+
+    logger.info(f"Receipt analysis: amount={result['amount']} confidence={result.get('confidence')} by {result['read_by']}")
+    return result
