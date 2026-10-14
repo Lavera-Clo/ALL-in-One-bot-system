@@ -239,8 +239,9 @@
                 <div><label>Bot's job title</label><input class="form-control" id="p_bot_role_title" placeholder="e.g. Events Consultant"></div>
                 <div><label>Location</label><input class="form-control" id="p_business_location" placeholder="e.g. Bentota, Sri Lanka"></div>
                 <div><label>Currency</label><input class="form-control" id="p_currency" placeholder="e.g. LKR"></div>
-                <div><label>Personality style</label><select class="form-control" id="p_persona_template"></select></div>
+                <div><label>Industry</label><select class="form-control" id="p_industry"></select></div>
             </div>
+            <p class="hint" style="margin:0.9rem 0 0">The industry sets how the bot talks, what it asks customers, what it must hand to a human, and the buttons it offers. Anything you type yourself below is kept.</p>
         </div>
 
         <div class="card">
@@ -261,6 +262,11 @@
             <p class="hint">The tappable list WhatsApp shows when a customer asks to see the options. One per line as <code>Title | Description</code>. Leave it empty for no list.</p>
             <div class="field">
                 <textarea class="form-control" id="p_quick_menu" placeholder="Grand Ballroom | 150-650 guests, air conditioned&#10;Garden Lawn | Outdoor lake view"></textarea>
+            </div>
+            <div class="field">
+                <label>Greeting buttons (up to 2, one per line, 20 characters each)</label>
+                <p class="hint">The buttons sent when a customer says hello. Leave it empty to use the ones for your industry, shown here in grey. A contact button is always added as the third.</p>
+                <textarea class="form-control" id="p_quick_buttons" style="min-height:4.5rem"></textarea>
             </div>
             <button class="btn btn-primary" id="saveProfileBtn"><i class="fa-solid fa-floppy-disk"></i> Save profile</button>
         </div>
@@ -296,7 +302,6 @@
 <script>
 const TOKEN_KEY = 'adminToken';
 let tenantId = null;
-let profileTemplates = [];
 
 const $ = (id) => document.getElementById(id);
 const getToken = () => sessionStorage.getItem(TOKEN_KEY);
@@ -668,15 +673,41 @@ async function loadProviders() {
 
 // ---------- profile ----------
 const PROFILE_FIELDS = ['business_name', 'bot_name', 'bot_role_title', 'business_location', 'currency',
-    'persona_template', 'human_handoff_number', 'front_office_number', 'handoff_rules', 'quick_menu'];
+    'industry', 'human_handoff_number', 'front_office_number', 'handoff_rules', 'quick_menu', 'quick_buttons'];
+
+let industries = [];          // [{key, label, role_title, handoff_rules, quick_buttons}]
+let shownIndustry = '';       // the industry whose defaults are currently on screen
+
+const industryInfo = (key) => industries.find((i) => i.key === key) || {};
+
+// The greyed-out hints show what the chosen industry provides when a field is left empty.
+function showIndustryDefaults(key) {
+    const info = industryInfo(key);
+    $('p_bot_role_title').placeholder = info.role_title ? `e.g. ${info.role_title}` : '';
+    $('p_quick_buttons').placeholder = info.quick_buttons || '';
+}
 
 async function loadProfile() {
     const data = await api(`/api/tenants/${tenantId}/bot-profile`);
-    profileTemplates = data.available_templates || [];
-    $('p_persona_template').innerHTML = profileTemplates
-        .map((t) => `<option value="${t}">${t.charAt(0).toUpperCase() + t.slice(1)}</option>`).join('');
+    industries = data.available_industries || [];
+    $('p_industry').innerHTML = industries
+        .map((i) => `<option value="${i.key}">${escapeHtml(i.label)}</option>`).join('');
     PROFILE_FIELDS.forEach((field) => { $('p_' + field).value = data[field] ?? ''; });
+    shownIndustry = $('p_industry').value;
+    showIndustryDefaults(shownIndustry);
 }
+
+// Switching industry swaps the hand-over rules too, but only if they are still the previous
+// industry's untouched defaults. Rules the business wrote themselves are never replaced.
+$('p_industry').addEventListener('change', (e) => {
+    const rules = $('p_handoff_rules');
+    const previous = industryInfo(shownIndustry).handoff_rules || '';
+    if (!rules.value.trim() || rules.value.trim() === previous.trim()) {
+        rules.value = industryInfo(e.target.value).handoff_rules || '';
+    }
+    shownIndustry = e.target.value;
+    showIndustryDefaults(shownIndustry);
+});
 
 $('saveProfileBtn').addEventListener('click', async () => {
     const payload = {};

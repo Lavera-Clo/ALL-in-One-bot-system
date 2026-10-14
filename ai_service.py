@@ -7,7 +7,8 @@ from openai import AsyncOpenAI
 from config import settings
 from prompts.persona_system_prompt import build_persona_prompt
 import llm_router
-from kb_retrieval import select_context
+from industry_brain import last_topic, playbook_prompt
+from kb_retrieval import select_context, _query_words
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -82,7 +83,7 @@ async def transcribe_audio(audio_bytes: bytes, api_key: str = "") -> str:
     whisper_prompt = (
         "The user is a customer in Sri Lanka asking a local business about products, prices and bookings. "
         "They might speak in English, Sinhala, or Singlish (Romanized Sinhala). "
-        "Examples of Singlish: 'package eke ganan kohomada', 'wedding ekata keeyada', 'menu eka ewanna'."
+        "Examples of Singlish: 'meke ganan kohomada', 'ada open da', 'details tika ewanna'."
     )
     try:
         return await llm_router.transcribe_audio(audio_bytes, "voice_note.ogg", whisper_prompt)
@@ -118,6 +119,27 @@ def get_sri_lanka_greeting() -> Tuple[str, str, str]:
 
     return en, si, sg
 
+# Singlish / Romanized Sinhala vocabulary. No business words belong here: 'wedding' used to be
+# on this list, so every English question about a wedding was answered in Singlish.
+SINGLISH_KEYWORDS = [
+    "ayubowan", "ayubowam", "subha", "udasanak", "dahawalak", "sandhawak",
+    "kohomada", "gaana", "gana", "kiyada", "ekak", "apita", "hari", "ewanna",
+    "wistara", "wistarathama", "ganan", "pahan", "monawada", "puluwanda", "puluwan",
+    "denna", "kiyanna", "balanna", "neda", "ane", "bro", "macho", "sthuthi",
+    "bohowama", "oya", "oyata", "oyalage", "mata", "wena", "thawa",
+    "diyan", "elama", "obata", "obatai", "gollan", "hitanne", "kello", "kollo",
+]
+
+# Singlish glues endings onto words ('ewannako', 'hariyata'), so a keyword may START a word.
+# It may not sit inside one: matching anywhere read 'brochure' (bro), 'royal' (oya), 'cleaner'
+# (ane) and 'sharing' (hari) as Singlish. The three-letter ones must be the whole word.
+_SINGLISH_RE = re.compile(
+    r"(?<![a-z])(?:"
+    + "|".join(re.escape(w) + (r"(?![a-z])" if len(w) <= 3 else "") for w in SINGLISH_KEYWORDS)
+    + r")"
+)
+
+
 def detect_language_intent(user_message: str, chat_history: List[Dict[str, str]] = None) -> str:
     """
     Strict Multilingual Language Intent Detector.
@@ -130,18 +152,8 @@ def detect_language_intent(user_message: str, chat_history: List[Dict[str, str]]
     if any('\u0d80' <= c <= '\u0dff' for c in user_message) or any(w in msg for w in ["සුභ", "ආයුබෝවන්", "මිල", "ගණන්", "මෙන්නු", "විස්තර", "ස්තුතියි", "කොහොමද"]):
         return "sinhala"
 
-    # 2. Singlish / Romanized Sinhala Check (Comprehensive vocabulary list)
-    singlish_keywords = [
-        "ayubowan", "ayubowam", "subha", "udasanak", "dahawalak", "sandhawak", 
-        "kohomada", "gaana", "gana", "kiyada", "ekak", "apita", "hari", "ewanna", 
-        "wistara", "wistarathama", "ganan", "pahan", "monawada", "puluwanda", "puluwan",
-        "denna", "kiyanna", "balanna", "neda", "ane", "bro", "macho", "sthuthi", 
-        "bohowama", "oya", "oyata", "oyalage", "mata", "wena", "thawa",
-        "diyan", "elama", "obata", "obatai", "gollan", "hitanne", "kello", "kollo", "wedding"
-    ]
-    
-    # Check current message for Singlish keywords
-    if any(re.search(rf"\b{re.escape(w)}\b", msg) or w in msg for w in singlish_keywords):
+    # 2. Singlish / Romanized Sinhala Check
+    if _SINGLISH_RE.search(msg):
         return "singlish"
 
     # 3. Check Chat History to Maintain Conversation Language Continuity
@@ -150,16 +162,38 @@ def detect_language_intent(user_message: str, chat_history: List[Dict[str, str]]
             past_text = past_msg.get("content", "").lower()
             if any('\u0d80' <= c <= '\u0dff' for c in past_text):
                 return "sinhala"
-            if any(w in past_text for w in singlish_keywords):
+            if _SINGLISH_RE.search(past_text):
                 return "singlish"
 
     return "english"
 
 
-def is_gibberish(text: str) -> bool:
+# Words that show a message is real language, whatever the business. The small everyday words
+# matter most: without them "do you have parking?" matched nothing and was called gibberish.
+# Words special to one business (its products, its halls) are NOT listed here - they arrive
+# through `known_words`, taken from that tenant's own knowledge base and industry.
+_EVERYDAY_WORDS = {
+    "a", "i", "an", "am", "is", "are", "do", "does", "the", "to", "of", "in", "on", "at", "it", "me",
+    "my", "we", "you", "your", "and", "or", "for", "with", "this", "that", "have", "has", "there",
+    "any", "much", "many", "get", "give", "tell", "about", "from", "not", "now",
+    "hi", "hello", "hey", "yes", "no", "ok", "okay", "thanks", "thank", "please",
+    "how", "what", "when", "where", "who", "why", "which", "can", "could", "will", "would", "want", "need",
+    "good", "morning", "afternoon", "evening", "night", "today", "tomorrow", "sir", "madam", "bro",
+    "price", "prices", "cost", "rate", "fee", "discount", "negotiate", "cheap", "offer",
+    "book", "booking", "date", "time", "open", "close", "hours", "available", "location", "address",
+    "start", "help", "contact", "manager", "call", "number", "phone", "send", "pdf", "brochure",
+    "detail", "details", "info", "list", "menu", "package", "service", "order", "buy", "delivery",
+    "ayubowan", "kohomada", "ewanna", "denna", "kiyanna", "puluwan", "hari", "oya", "mata",
+    "ganan", "mila", "kiyada", "sthuthi", "eka", "eke", "ekak", "meka", "ada", "heta",
+}
+
+
+def is_gibberish(text: str, known_words=frozenset()) -> bool:
     """
     Detects if a message is gibberish / random keystrokes / spam.
     Returns True if the message appears to be meaningless.
+
+    `known_words` are extra lowercase words that count as real for this tenant.
     """
     msg = text.strip()
 
@@ -193,20 +227,9 @@ def is_gibberish(text: str) -> bool:
         # Almost no vowels in 4+ characters — likely gibberish ("ffsdsff", "bcdfgh")
         return True
 
-    # Check 3: No recognizable words at all — check against common words
-    common_words = {
-        "hi", "hello", "hey", "yes", "no", "ok", "okay", "thanks", "thank", "please",
-        "price", "cost", "menu", "hall", "wedding", "event", "book", "date", "pax",
-        "how", "what", "when", "where", "who", "why", "can", "will", "want", "need",
-        "good", "morning", "afternoon", "evening", "night", "sir", "madam", "bro",
-        "ayubowan", "kohomada", "ewanna", "denna", "kiyanna", "puluwan", "hari",
-        "oya", "mata", "ganan", "mila", "sthuthi", "start", "help", "contact",
-        "manager", "call", "number", "phone", "send", "pdf", "brochure", "detail",
-        "silver", "gold", "premier", "grand", "starlight", "ballroom", "view",
-        "discount", "negotiate", "cheap", "register", "registration", "package",
-    }
+    # Check 3: No recognizable words at all — check against everyday words plus this tenant's own
     words_in_msg = set(re.findall(r'[a-zA-Z]+', msg.lower()))
-    if words_in_msg and not words_in_msg.intersection(common_words):
+    if words_in_msg and not (words_in_msg & _EVERYDAY_WORDS or words_in_msg & known_words):
         # None of the words match any known word — likely gibberish
         # But only flag if all words are short random sequences
         avg_word_len = sum(len(w) for w in words_in_msg) / len(words_in_msg)
@@ -258,45 +281,67 @@ def find_repeated_question(user_message: str, chat_history: List[Dict[str, str]]
     return False, ""
 
 
-def get_returning_customer_context(chat_history: List[Dict[str, str]]) -> Tuple[bool, str]:
+def get_returning_customer_context(chat_history: List[Dict[str, str]], config=None) -> Tuple[bool, str]:
     """
     Checks if this is a returning customer (has significant past history).
-    Returns (is_returning, last_topic_summary).
+    Returns (is_returning, last_topic_summary). The topic is named in this tenant's own terms -
+    their industry's vocabulary and their quick-menu titles - and is '' when nothing they said
+    is recognisable, so a salon's customer is never welcomed back to "your event plans".
     """
     if not chat_history or len(chat_history) < 4:
         return False, ""
 
-    # Extract the last few user messages to figure out what they were discussing
-    topic_keywords = {
-        "price": "prices & packages", "cost": "prices & packages", "ganan": "prices & packages",
-        "rate": "prices & packages", "budget": "prices & packages", "pax": "prices & packages",
-        "menu": "menu options", "food": "menu options", "kema": "menu options",
-        "silver": "the Silver package", "gold": "the Gold package", "premier": "the Premier package",
-        "hall": "venue options", "ballroom": "venue options", "grand": "the Grand Ballroom",
-        "starlight": "the Starlight Ballroom", "venue": "venue options",
-        "wedding": "your wedding plans", "event": "your event",
-        "register": "registration packages", "regi": "registration packages",
-        "date": "dates & availability", "book": "booking",
-        "brochure": "our brochures", "pdf": "our brochures",
-    }
+    if config is None:
+        from tenant_config import BotConfig
+        config = BotConfig(tenant_id=0, business_name="our business")
 
-    last_topic = ""
-    # Scan recent user messages in reverse to find the last meaningful topic
-    for entry in reversed(chat_history):
-        if entry.get("role") != "user":
+    # Scan user messages newest-first to find the last meaningful topic
+    past_messages = [e.get("content", "") for e in reversed(chat_history) if e.get("role") == "user"]
+    return True, last_topic(past_messages, config.pack, config.menu_titles)
+
+
+# Asking what something costs, in English, Singlish and Sinhala. Whole words only, so that
+# "coffee" (fee) and "celebrate" (rate) are not read as price questions.
+_PRICE_RE = re.compile(
+    r"(?<![a-z])(?:prices?|pricing|rates?|costs?|fees?|charges?|how much|ganan|gaana|kiyada|keeyada|mila)(?![a-z])"
+    r"|මිල|ගණන්|කීයද"
+)
+# A line that states an amount: a currency mark beside a number, or any number of 3+ digits.
+_AMOUNT_RE = re.compile(r"(?:rs\.?|lkr|usd|\$|€|£)\s?\d|\d\s?/-|\d[\d,]{2,}", re.IGNORECASE)
+
+
+def relevant_kb_lines(message: str, kb_lines: List[str], limit: int = 6) -> List[str]:
+    """
+    The knowledge-base lines that share the most words with the customer's message, for the
+    offline fallback. A price question also pulls in lines that state an amount.
+
+    This replaced a fixed list of one client's words ("silver", "ballroom", "corkage"), which
+    found nothing at all in any other business's knowledge base. A matching FAQ question is
+    answered with its "A:" line. Results come back in document order.
+    """
+    words = _query_words(message)
+    wants_price = bool(_PRICE_RE.search(message.lower()))
+    scored = []
+    for position, line in enumerate(kb_lines):
+        # Not facts: source banners, headings, instructions to the AI, and answers (reached via their Q:)
+        if line.startswith(("=====", "---", "#", "[", "A:")):
             continue
-        content = entry.get("content", "").lower()
-        for keyword, topic in topic_keywords.items():
-            if keyword in content:
-                last_topic = topic
-                break
-        if last_topic:
-            break
+        score = len(words & _query_words(line))
+        if wants_price and _AMOUNT_RE.search(line):
+            score += 1
+        if score:
+            scored.append((score, position))
+    scored.sort(key=lambda item: (-item[0], item[1]))
 
-    if not last_topic:
-        last_topic = "your event plans"
-
-    return True, last_topic
+    chosen = []
+    for _, position in sorted(scored[:limit], key=lambda item: item[1]):
+        line = kb_lines[position]
+        if line.startswith("Q:") and position + 1 < len(kb_lines) and kb_lines[position + 1].startswith("A:"):
+            line = kb_lines[position + 1][2:]
+        line = line.lstrip("-•* ").strip()
+        if line and line not in chosen:
+            chosen.append(line)
+    return chosen
 
 
 def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_prompt: str, chat_history: List[Dict[str, str]] = None, config=None) -> str:
@@ -319,7 +364,8 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
     is_singlish = (lang == "singlish")
 
     # Front Office Phone & Customization Handoff Check
-    is_front_office_query = any(w in msg for w in ["reception", "front office", "phone", "call", "contact", "number", "fo", "දුරකථන", "අංකය", "කෝල්", "hotline"])
+    # "fo" (front office) only as a word of its own - as a substring it matched "for", "info", "food".
+    is_front_office_query = bool(re.search(r"\bfo\b", msg)) or any(w in msg for w in ["reception", "front office", "phone", "call", "contact", "number", "දුරකථන", "අංකය", "කෝල්", "hotline"])
     is_customization_query = any(w in msg for w in [
         "customize", "customise", "custom", "swap", "discount", "special menu",
         "change menu", "manager", "human", "person", "staff",
@@ -349,7 +395,9 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
     # GIBBERISH / SPAM DETECTION (runs before everything else)
     # -----------------------------------------------------------
     if not is_pure_greeting and not is_front_office_query and not is_customization_query:
-        if is_gibberish(user_message):
+        # Real words for THIS business: its industry's vocabulary and whatever its own documents say.
+        known_words = config.pack.vocabulary | set(re.findall(r"[a-z]+", knowledge_base.lower()))
+        if is_gibberish(user_message, known_words):
             if is_sinhala:
                 return "මට ඒක හරියට තේරුණේ නැ 😅\nඔබට අවශ්‍ය දේ නැවත ටයිප් කරන්න පුළුවන්ද?"
             elif is_singlish:
@@ -386,24 +434,28 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
     # RETURNING CUSTOMER GREETING (on pure greetings only)
     # -----------------------------------------------------------
     if is_pure_greeting and not is_first_message:
-        is_returning, last_topic = get_returning_customer_context(chat_history)
+        is_returning, topic = get_returning_customer_context(chat_history, config)
         if is_returning:
+            # The "last time we talked about..." line is only said when the topic is actually known.
             if is_sinhala:
+                recap = f"පසුගිය වතාවේ අපි _{topic}_ ගැන කතා කරමින් හිටියා.\n" if topic else ""
                 return (
                     f"👋 *ආයුබෝවන්! {greeting_si}!* ආපහු සාදරයෙන් පිළිගනිමු 🌺\n\n"
-                    f"පසුගිය වතාවේ අපි _{last_topic}_ ගැන කතා කරමින් හිටියා.\n"
+                    f"{recap}"
                     f"අද මොකද බලාපොරොත්තු වෙන්නේ?"
                 )
             elif is_singlish:
+                recap = f"Kalin apa _{topic}_ gena katha karanawa hitiya.\n" if topic else ""
                 return (
                     f"👋 *Ayubowan! {greeting_sg}!* Aapu welcome back 🌺\n\n"
-                    f"Kalin apa _{last_topic}_ gena katha karanawa hitiya.\n"
+                    f"{recap}"
                     f"Ada mokada balaporoththu wenne?"
                 )
             else:
+                recap = f"Last time we were chatting about _{topic}_.\n" if topic else ""
                 return (
                     f"👋 *{greeting_en}!* Welcome back 🌺\n\n"
-                    f"Last time we were chatting about _{last_topic}_.\n"
+                    f"{recap}"
                     f"How can I help you today?"
                 )
 
@@ -476,30 +528,24 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
         else:
             return f"👋 *{greeting_en}!* Welcome to {business}. 🌺\n\nHow may we help you today?"
 
-    # Match topic keywords
-    matched_lines = []
-    if any(w in msg for w in ["price", "prices", "rate", "cost", "pax", "silver", "gold", "premier", "ballroom", "starlight", "ganan", "kiyada"]):
-        for line in kb_lines:
-            if any(k in line.lower() for k in ["pax", "silver", "gold", "premier", "ballroom", "starlight", "plate", "per head", "rs.", "$"]):
-                matched_lines.append(f"• {line}")
-
-    if any(w in msg for w in ["menu", "items", "compliment", "policy", "deposit", "corkage", "music", "detail"]):
-        for line in kb_lines:
-            if any(k in line.lower() for k in ["menu", "extra", "deposit", "corkage", "music", "policy", "brochure"]):
-                matched_lines.append(f"• {line}")
+    # The lines of THIS tenant's knowledge base that the message is about
+    matched_lines = relevant_kb_lines(msg, kb_lines)
 
     # Response with language consistency & session awareness (Greetings ONLY on first message)
     if matched_lines:
-        details = "\n".join(matched_lines[:6])
+        details = "\n".join(f"• {line}" for line in matched_lines)
+        # Only say a file is attached when one of this tenant's documents really will be.
+        will_attach = bool(get_pdfs_for_user_message(user_message, config))
         if is_sinhala:
-            header = f"✨ *{greeting_si}! ඔබ ඉල්ලා සිටි පැකේජ විස්තර මෙන්න:*\n\n" if is_first_message else "✨ *ඔබ ඉල්ලා සිටි පැකේජ විස්තර මෙන්න:*\n\n"
-            return f"{header}{details}\n\nමම ඔබ වෙනුවෙන් නිල PDF ලේඛනය පහතින් ලබා දී ඇත! 👇"
+            header = f"✨ *{greeting_si}! ඔබ ඉල්ලා සිටි විස්තර මෙන්න:*\n\n" if is_first_message else "✨ *ඔබ ඉල්ලා සිටි විස්තර මෙන්න:*\n\n"
+            attach_note = "\n\nමම ඔබ වෙනුවෙන් නිල PDF ලේඛනය පහතින් ලබා දී ඇත! 👇" if will_attach else ""
         elif is_singlish:
-            header = f"✨ *{greeting_sg}! Oyala illa hitapu package details menna:*\n\n" if is_first_message else "✨ *Oyala illa hitapu package details menna:*\n\n"
-            return f"{header}{details}\n\nMan official PDF brochure eka pahalin attach kara! 👇"
+            header = f"✨ *{greeting_sg}! Oyala illa hitapu details menna:*\n\n" if is_first_message else "✨ *Oyala illa hitapu details menna:*\n\n"
+            attach_note = "\n\nMan official PDF eka pahalin attach kara! 👇" if will_attach else ""
         else:
             header = f"✨ *{greeting_en}! Thank you for contacting {config.business_name}. Here are the requested details:*\n\n" if is_first_message else "✨ *Here are the requested details:*\n\n"
-            return f"{header}{details}\n\nI have attached our official PDF brochure for you below! 👇"
+            attach_note = "\n\nI have attached our official PDF for you below! 👇" if will_attach else ""
+        return f"{header}{details}{attach_note}"
     else:
         # Can't find a relevant answer in KB — ask them to clarify instead of immediately handing off
         if is_sinhala:
@@ -699,8 +745,11 @@ async def generate_ai_response(
             "------------------------------------------\n"
         )
 
-        # Build persona prompt (the warm, human-like "Nethmi" persona)
+        # Build persona prompt (warm and human, in the voice of this tenant's industry)
         persona_prompt = build_persona_prompt(config)
+
+        # What customers of this kind of business need, and what it must never say.
+        industry_playbook = playbook_prompt(config.pack)
 
         # Only the knowledge-base sections this message needs (see kb_retrieval.py).
         kb_context, kb_info = await select_context(knowledge_base, user_message, chat_history)
@@ -710,6 +759,7 @@ async def generate_ai_response(
         full_system_instructions = (
             f"{persona_prompt}\n\n"
             f"{system_prompt}\n\n"
+            f"{industry_playbook}\n\n"
             f"--- KNOWLEDGE BASE (the parts relevant to this message) ---\n"
             f"{kb_context}\n"
             f"----------------------\n"

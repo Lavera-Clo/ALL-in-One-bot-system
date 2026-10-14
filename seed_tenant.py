@@ -43,7 +43,8 @@ async def seed_data():
                 "- Ginger Tea: Rs. 150\n"
                 "Payment options: Cash on Delivery or Card payment on delivery."
             ),
-            human_handoff_number="+94771234567"
+            human_handoff_number="+94771234567",
+            industry="restaurant"
         )
 
         tenant2 = Tenant(
@@ -61,7 +62,8 @@ async def seed_data():
                 "- Data Recovery: starting from Rs. 8,000\n"
                 "Turnaround time: 1-2 working days."
             ),
-            human_handoff_number="+94719998877"
+            human_handoff_number="+94719998877",
+            industry="professional"
         )
 
         session.add_all([tenant1, tenant2])

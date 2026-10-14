@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import quote
 
+from industry_brain import IndustryPack, get_pack, parse_quick_buttons, quick_buttons, resolve_industry
+from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
+
 
 def _digits_only(number: Optional[str]) -> str:
     """'+94 77 999 8877' -> '94779998877', the form wa.me links need."""
@@ -47,13 +50,24 @@ class BotConfig:
     bot_role_title: str = "Customer Care Assistant"
     business_location: str = ""
     currency: str = ""
+    industry: str = "generic"           # key of an IndustryPack, see industry_brain.py
     persona_template: str = "generic"
     manager_whatsapp: Optional[str] = None
     front_office_number: Optional[str] = None
     handoff_rules: str = ""
     documents: List[SendableDoc] = field(default_factory=list)
+    button_titles: List[str] = field(default_factory=list)   # the client's own greeting buttons, if any
+    menu_titles: List[str] = field(default_factory=list)     # what the client calls their own offerings
 
     # ---------- derived helpers, used when building prompts and replies ----------
+
+    @property
+    def pack(self) -> IndustryPack:
+        return get_pack(self.industry)
+
+    def quick_buttons(self) -> List[dict]:
+        """Greeting buttons: the client's own, else their industry's, then the contact button."""
+        return quick_buttons(self.pack, self.button_titles)
 
     @property
     def has_manager(self) -> bool:
@@ -91,12 +105,9 @@ class BotConfig:
         return [d for d in self.documents if d.matches(msg)]
 
 
-# Sensible per-industry defaults, applied only when a client leaves a field blank.
-DEFAULT_HANDOFF_RULES = """Discounts, special prices, negotiation or bargaining
-Custom or special requests beyond the standard packages
-Bookings, date holds and reservation confirmations
-Complaints, refunds and cancellations
-Any explicit request to speak to a manager, human or staff member"""
+# Used when a client leaves the field blank AND has no industry set. Each industry has its own
+# defaults in industry_brain.py; this is the generic pack's, kept under its old name.
+DEFAULT_HANDOFF_RULES = get_pack("generic").handoff_text
 
 
 def build_bot_config(tenant, documents=None) -> BotConfig:
@@ -124,19 +135,35 @@ def build_bot_config(tenant, documents=None) -> BotConfig:
             )
         )
 
+    # The industry supplies the defaults; whatever the client set on their own row wins.
+    industry = resolve_industry(tenant.industry, tenant.persona_template)
+    pack = get_pack(industry)
+
     return BotConfig(
         tenant_id=tenant.id,
         business_name=tenant.business_name,
         bot_name=tenant.bot_name or "Assistant",
-        bot_role_title=tenant.bot_role_title or "Customer Care Assistant",
+        bot_role_title=tenant.bot_role_title or pack.role_title,
         business_location=tenant.business_location or "",
         currency=tenant.currency or "",
-        persona_template=tenant.persona_template or "generic",
+        industry=industry,
+        persona_template=resolve_persona(tenant.persona_template, pack),
         manager_whatsapp=tenant.human_handoff_number,
         front_office_number=tenant.front_office_number,
-        handoff_rules=tenant.handoff_rules or DEFAULT_HANDOFF_RULES,
+        handoff_rules=tenant.handoff_rules or pack.handoff_text,
         documents=sendable,
+        button_titles=parse_quick_buttons(tenant.quick_buttons),
+        menu_titles=[row["title"] for row in parse_quick_menu(tenant.quick_menu)],
     )
+
+
+def resolve_persona(persona_template: Optional[str], pack: IndustryPack) -> str:
+    """
+    The persona a tenant speaks with: an explicit, valid choice on their row, otherwise their
+    industry's. Anything else stored there is ignored - older rows hold tone words like
+    'friendly', which never matched a persona and silently fell back to the generic one.
+    """
+    return persona_template if persona_template in AVAILABLE_TEMPLATES else pack.persona
 
 
 def parse_quick_menu(quick_menu: Optional[str]) -> List[dict]:

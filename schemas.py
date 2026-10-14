@@ -1,6 +1,18 @@
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
+
+from industry_brain import INDUSTRY_KEYS, normalise_industry
+
+
+def _industry_key(value: Optional[str]) -> Optional[str]:
+    """Accepts a key or a common name ('hotel', 'Real Estate') and stores the key. Empty stays empty."""
+    if value is None or not str(value).strip():
+        return value
+    key = normalise_industry(value)
+    if not key:
+        raise ValueError(f"industry must be one of: {', '.join(INDUSTRY_KEYS)}")
+    return key
 
 # Tenant Schemas
 class TenantBase(BaseModel):
@@ -17,9 +29,11 @@ class TenantBase(BaseModel):
     )
     human_handoff_number: Optional[str] = Field(None, example="+94771234567")
     front_office_number: Optional[str] = Field(None, example="+94342275000")
+    # The line of business; picks the bot's persona, handoff rules, buttons and safety limits.
+    industry: Optional[str] = Field(None, example="restaurant")
 
 class TenantCreate(TenantBase):
-    pass
+    _check_industry = field_validator("industry")(_industry_key)
 
 class TenantUpdate(BaseModel):
     business_name: Optional[str] = None
@@ -30,6 +44,9 @@ class TenantUpdate(BaseModel):
     human_handoff_number: Optional[str] = None
     front_office_number: Optional[str] = None
     bank_details: Optional[str] = None
+    industry: Optional[str] = None
+
+    _check_industry = field_validator("industry")(_industry_key)
 
 class TenantResponse(TenantBase):
     id: int
@@ -216,11 +233,15 @@ class BotProfileUpdate(BaseModel):
     bot_role_title: Optional[str] = Field(None, example="Senior Banquet & Events Consultant")
     business_location: Optional[str] = Field(None, example="Bentota, Sri Lanka")
     currency: Optional[str] = Field(None, example="LKR")
+    industry: Optional[str] = Field(None, example="hospitality")
     persona_template: Optional[str] = Field(None, example="hospitality")
     human_handoff_number: Optional[str] = Field(None, example="+94779998877")
     front_office_number: Optional[str] = Field(None, example="+94342275000")
     handoff_rules: Optional[str] = Field(None, example="Discounts and negotiation\nComplaints and refunds")
     quick_menu: Optional[str] = Field(None, example="Grand Ballroom | 150-650 guests\nGarden Lawn | Outdoor lake view")
+    quick_buttons: Optional[str] = Field(None, example="📊 View Prices\n🍽️ View Menus")
+
+    _check_industry = field_validator("industry")(_industry_key)
 
 
 class TenantDocumentUpdate(BaseModel):

@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from config import settings
+from industry_brain import detect_industry, normalise_industry
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -61,7 +62,28 @@ _COLUMN_MIGRATIONS = [
     ("tenant_documents", "training_report", "TEXT"),
     ("tenant_documents", "extraction_method", "VARCHAR(30)"),
     ("tenant_documents", "public_path", "TEXT"),
+    ("tenants", "industry", "VARCHAR(50)"),
+    ("tenants", "quick_buttons", "TEXT"),
 ]
+
+
+async def _backfill_tenant_industry(conn) -> None:
+    """
+    Runs once, when tenants.industry is first added. Older rows carried the industry in
+    persona_template ('hospitality', 'retail', 'services'); where that says nothing useful it
+    is read from the business's own name and prompt. Unclear rows stay empty and run generic.
+    """
+    rows = (await conn.execute(text(
+        "SELECT id, business_name, bot_role_title, system_prompt, persona_template FROM tenants"
+    ))).fetchall()
+    for tenant_id, name, role_title, system_prompt, persona in rows:
+        industry = normalise_industry(persona)
+        if industry in ("", "generic"):
+            industry = detect_industry(f"{role_title or ''} {system_prompt or ''}", name or "") or industry
+        if industry:
+            await conn.execute(text("UPDATE tenants SET industry = :industry WHERE id = :id"),
+                               {"industry": industry, "id": tenant_id})
+            logger.info(f"Tenant {tenant_id} ({name}): industry set to '{industry}'.")
 
 
 async def init_db() -> None:
@@ -76,5 +98,7 @@ async def init_db() -> None:
                 if column not in existing_columns:
                     await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}"))
                     logger.info(f"Migrated {table} table: added {column} column.")
+                    if (table, column) == ("tenants", "industry"):
+                        await _backfill_tenant_industry(conn)
 
     logger.info("Database initialized successfully.")

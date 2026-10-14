@@ -167,7 +167,8 @@ async def lifespan(app: FastAPI):
                     "- Advance Booking Deposit: 25% to hold date. Noise cutoff: 11:30 PM."
                 ),
                 human_handoff_number="+94779998877",
-                front_office_number="+94342275000"
+                front_office_number="+94342275000",
+                industry="hospitality"
             )
             session.add(wasala_tenant)
             await session.commit()
@@ -538,7 +539,8 @@ from document_service import (
 )
 import llm_router
 from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
-from tenant_config import DEFAULT_HANDOFF_RULES, build_bot_config, parse_quick_menu
+from tenant_config import build_bot_config, parse_quick_menu
+from industry_brain import CONTACT_BUTTON_ID, INDUSTRY_CHOICES, button_phrase, get_pack
 
 
 @app.get("/train", tags=["Knowledge Base Trainer"])
@@ -591,6 +593,7 @@ async def get_bot_profile(
 ):
     """The business identity and contact details this tenant's bot speaks with."""
     tenant = await _get_tenant_or_404(db, tenant_id)
+    config = build_bot_config(tenant)
     return {
         "tenant_id": tenant.id,
         "business_name": tenant.business_name,
@@ -598,12 +601,25 @@ async def get_bot_profile(
         "bot_role_title": tenant.bot_role_title or "",
         "business_location": tenant.business_location or "",
         "currency": tenant.currency or "",
-        "persona_template": tenant.persona_template or "generic",
+        "industry": config.industry,
+        "persona_template": config.persona_template,
         "human_handoff_number": tenant.human_handoff_number or "",
         "front_office_number": tenant.front_office_number or "",
-        "handoff_rules": tenant.handoff_rules or DEFAULT_HANDOFF_RULES,
+        "handoff_rules": config.handoff_rules,
         "quick_menu": tenant.quick_menu or "",
+        "quick_buttons": tenant.quick_buttons or "",
         "available_templates": AVAILABLE_TEMPLATES,
+        # What each industry gives a business that has not typed its own, so the portal can
+        # show them and swap them when the industry is changed.
+        "available_industries": [
+            {
+                **choice,
+                "role_title": get_pack(choice["key"]).role_title,
+                "handoff_rules": get_pack(choice["key"]).handoff_text,
+                "quick_buttons": "\n".join(get_pack(choice["key"]).buttons),
+            }
+            for choice in INDUSTRY_CHOICES
+        ],
     }
 
 
@@ -623,7 +639,15 @@ async def update_bot_profile(
             detail=f"persona_template must be one of: {', '.join(AVAILABLE_TEMPLATES)}"
         )
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+
+    # Choosing a different industry brings that industry's personality with it, unless this same
+    # request names another one.
+    new_industry = changes.get("industry")
+    if new_industry and new_industry != build_bot_config(tenant).industry and not changes.get("persona_template"):
+        changes["persona_template"] = ""
+
+    for field, value in changes.items():
         if value is not None:
             setattr(tenant, field, value)
 
@@ -795,16 +819,21 @@ async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
     products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)
     products_res = await db.execute(products_stmt)
     live_products = products_res.scalars().all()
-    
+
+    # A business that sells no products through the bot (a clinic, a salon, a venue) gets no
+    # inventory block at all. It used to be told "No products currently listed", which the bot
+    # then repeated to customers asking what the business offers.
+    if not live_products:
+        return tenant.knowledge_base or ""
+
+    # Prices are in the tenant's own currency (this printed "$" for every business).
+    currency = f"{tenant.currency} " if tenant.currency else ""
     inventory_str = "\n\n--- LIVE ERP INVENTORY ---\n"
-    if live_products:
-        for p in live_products:
-            status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
-            inventory_str += f"- {p.name}: ${p.price} ({status})\n"
-        inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
-    else:
-        inventory_str += "No products currently listed.\n"
-    
+    for p in live_products:
+        status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
+        inventory_str += f"- {p.name}: {currency}{p.price:,.2f} ({status})\n"
+    inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
+
     return (tenant.knowledge_base or "") + inventory_str
 
 
@@ -856,16 +885,23 @@ async def auto_generate_bot_profile(
     if not kb.strip() or kb.strip() == "No business documentation has been uploaded yet.":
         raise HTTPException(status_code=400, detail="Upload at least one business document before generating a profile.")
 
-    profile = await generate_bot_profile(kb, business_name_hint=tenant.business_name)
+    try:
+        profile = await generate_bot_profile(kb, business_name_hint=tenant.business_name)
+    except llm_router.LLMUnavailable as e:
+        # Nothing is applied: this used to overwrite the tenant's prompt, rules and menu with
+        # placeholder text whenever the AI providers were busy.
+        raise HTTPException(status_code=503, detail=f"No AI provider could generate the profile right now ({e}). Nothing was changed.")
 
-    # Auto-apply the profile to the tenant
+    # Auto-apply the profile to the tenant. The industry decides the persona, so any older
+    # persona value is cleared rather than replaced with a tone word no persona is named after.
+    tenant.industry = profile.industry
+    tenant.persona_template = None
     tenant.bot_name = profile.bot_name
     tenant.bot_role_title = profile.bot_role_title
-    tenant.persona_template = profile.persona_template
     tenant.system_prompt = profile.system_prompt
     tenant.handoff_rules = profile.handoff_rules
-    tenant.quick_menu = profile.quick_menu
-    tenant.currency = profile.currency
+    tenant.quick_menu = profile.quick_menu or tenant.quick_menu     # keep what they had if the model gave none
+    tenant.currency = profile.currency or tenant.currency
     await db.commit()
     from bot_learning import clear_tenant_cache
     await clear_tenant_cache(db, tenant.id)     # answers cached under the old persona/rules
@@ -875,6 +911,7 @@ async def auto_generate_bot_profile(
         "profile": {
             "business_name": profile.business_name,
             "business_type": profile.business_type,
+            "industry": profile.industry,
             "bot_name": profile.bot_name,
             "bot_role_title": profile.bot_role_title,
             "persona_template": profile.persona_template,
@@ -1085,6 +1122,7 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     msg_type = message.get("type")
                     customer_phone = message.get("from")
                     user_text = ""
+                    tapped_button_id = ""    # id of the reply button the customer tapped, if any
 
                     if not customer_phone:
                         continue
@@ -1116,6 +1154,7 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                         if i_type == "button_reply":
                             user_text = interactive_obj.get("button_reply", {}).get("title", "").strip()
                             btn_id = interactive_obj.get("button_reply", {}).get("id", "")
+                            tapped_button_id = btn_id
                             # Handle order confirmation/rejection by manager via WhatsApp buttons
                             if btn_id.startswith("confirm_ord_"):
                                 order_num = btn_id.replace("confirm_ord_", "")
@@ -1281,7 +1320,7 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                         await send_whatsapp_message(
                                             phone_number_id=tenant.whatsapp_phone_number_id,
                                             recipient_phone=customer_phone,
-                                            message_text="Thank you for the image! 📸 We don't have any products listed at the moment. Feel free to ask about our banquet packages! 🏛️",
+                                            message_text="Thank you for the image! 📸 Could you tell me in a message what you'd like to know about it? 🙏",
                                             meta_access_token=tenant.meta_access_token
                                         )
                         continue
@@ -1678,13 +1717,12 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                         w in msg_lower for w in ["option", "options", "help", "menu", "start", "main menu"])
                     should_send_quick_buttons = is_pure_greeting or is_menu_request
 
+                    # The buttons fit the tenant's line of business (a clinic offers "Book Appointment",
+                    # not "View Menus"); every tenant used to get the banquet hall's three.
+                    quick_buttons = bot_config.quick_buttons()
+
                     if should_send_quick_buttons:
                         interactive_sent = True
-                        quick_buttons = [
-                            {"id": "btn_prices", "title": "📊 View Prices"},
-                            {"id": "btn_menus", "title": "🍽️ View Menus"},
-                            {"id": "btn_contact", "title": "📞 Contact Manager"}
-                        ]
                         try:
                             await send_whatsapp_button_message(
                                 phone_number_id=tenant.whatsapp_phone_number_id,
@@ -1705,7 +1743,9 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                         # Fire on generic "show me the options" intent, plus the words the client
                         # used in their own menu titles.
                         menu_words = {w for row in quick_menu_rows for w in row["title"].lower().split() if len(w) > 3}
-                        generic_triggers = ["option", "options", "view prices", "view menus", "package", "packages", "capacity"]
+                        # ...and a tap on either greeting button, whatever this tenant's are called.
+                        button_phrases = [button_phrase(b["title"]) for b in quick_buttons if b["id"] != CONTACT_BUTTON_ID]
+                        generic_triggers = ["option", "options", "package", "packages", "capacity"] + button_phrases
                         is_short = len(msg_lower.split()) <= 4      # long specific questions get an answer, not a list
                         if is_short and (any(w in msg_lower for w in generic_triggers) or any(w in msg_lower for w in menu_words)):
                             interactive_sent = True
@@ -1723,7 +1763,9 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 logger.error(f"Failed to send quick list menu to {customer_phone}: {list_err}")
 
                     # "Contact Manager" Button Handler — send both phone numbers
-                    is_contact_request = msg_lower in ["contact manager", "📞 contact manager"] or any(
+                    # The contact button has a different title per industry ("Call Reception",
+                    # "Talk to an Agent"), so it is recognised by its id.
+                    is_contact_request = tapped_button_id == CONTACT_BUTTON_ID or any(
                         w in msg_lower for w in ["contact manager", "talk to manager", "speak to manager", "call manager"]
                     )
                     if is_contact_request:

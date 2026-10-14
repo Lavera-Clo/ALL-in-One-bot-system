@@ -25,11 +25,17 @@ class Tenant(Base):
     bot_role_title: Mapped[str | None] = mapped_column(String(150), nullable=True)
     business_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    persona_template: Mapped[str | None] = mapped_column(String(50), nullable=True)  # 'hospitality' | 'retail' | 'generic'
+    # Which line of business this is: the key of an IndustryPack in industry_brain.py
+    # ('hospitality', 'restaurant', 'clinic', ...). It picks the bot's persona, default handoff
+    # rules, greeting buttons and safety limits. Every other field here can still override it.
+    industry: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    persona_template: Mapped[str | None] = mapped_column(String(50), nullable=True)  # optional override; empty = the industry's persona
     handoff_rules: Mapped[str | None] = mapped_column(Text, nullable=True)  # one rule per line, injected into the prompt
     # WhatsApp quick-pick list, one item per line as "Title | Description".
     # Empty means this client simply gets no list menu (instead of another client's halls).
     quick_menu: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The two reply buttons sent with a greeting, one title per line. Empty = the industry's defaults.
+    quick_buttons: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

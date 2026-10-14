@@ -74,7 +74,8 @@ async def onboard_banquet_tenant(
             meta_access_token=meta_access_token,
             system_prompt=system_prompt,
             knowledge_base=knowledge_base,
-            human_handoff_number=human_handoff_number
+            human_handoff_number=human_handoff_number,
+            industry="hospitality"
         )
         session.add(new_tenant)
         await session.commit()
