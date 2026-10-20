@@ -64,6 +64,8 @@ _COLUMN_MIGRATIONS = [
     ("tenant_documents", "public_path", "TEXT"),
     ("tenants", "industry", "VARCHAR(50)"),
     ("tenants", "quick_buttons", "TEXT"),
+    ("tenants", "industry_source", "VARCHAR(20)"),
+    ("tenants", "understanding", "TEXT"),
 ]
 
 

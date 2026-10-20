@@ -58,6 +58,7 @@ class BotConfig:
     documents: List[SendableDoc] = field(default_factory=list)
     button_titles: List[str] = field(default_factory=list)   # the client's own greeting buttons, if any
     menu_titles: List[str] = field(default_factory=list)     # what the client calls their own offerings
+    playbook: str = ""        # the owner's conversation playbook(s), see playbook_pipeline.py
 
     # ---------- derived helpers, used when building prompts and replies ----------
 
@@ -119,7 +120,11 @@ def build_bot_config(tenant, documents=None) -> BotConfig:
     back to somebody else's PDFs.
     """
     sendable: List[SendableDoc] = []
+    playbooks: List[str] = []
     for doc in documents or []:
+        if doc.is_active and doc.doc_type == "playbook" and (doc.summary or "").strip():
+            playbooks.append(doc.summary.strip())
+            continue
         if not doc.is_active or doc.doc_type not in ("sendable", "both"):
             continue
         if not doc.file_url:
@@ -154,6 +159,7 @@ def build_bot_config(tenant, documents=None) -> BotConfig:
         documents=sendable,
         button_titles=parse_quick_buttons(tenant.quick_buttons),
         menu_titles=[row["title"] for row in parse_quick_menu(tenant.quick_menu)],
+        playbook="\n\n".join(playbooks),
     )
 
 

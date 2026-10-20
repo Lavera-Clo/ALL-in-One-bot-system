@@ -377,10 +377,10 @@ async def test_webhook(client: httpx.AsyncClient):
         return {}
 
     async def canned_reply(**kwargs):
-        return "Hello! How can I help?", False
+        return ai_service.BotReply("Hello! How can I help?")
 
-    originals = (main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_ai_response)
-    main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_ai_response = record_buttons, record_text, canned_reply
+    originals = (main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_bot_reply)
+    main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_bot_reply = record_buttons, record_text, canned_reply
     try:
         await client.post("/webhook", json=webhook_payload("1004", {"id": "wamid.1", "type": "text", "text": {"body": "hi"}}))
         check(sent["buttons"] and [b["title"] for b in sent["buttons"][-1]] == ["📅 Book Appointment", "🕒 Opening Hours", "📞 Call Reception"],
@@ -400,7 +400,7 @@ async def test_webhook(client: httpx.AsyncClient):
         check(any("+94112345678" in text for text in sent["texts"]),
               "tapping the contact button sends the number, whatever the button is called")
     finally:
-        main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_ai_response = originals
+        main.send_whatsapp_button_message, main.send_whatsapp_message, main.generate_bot_reply = originals
 
 
 async def test_dynamic_kb():

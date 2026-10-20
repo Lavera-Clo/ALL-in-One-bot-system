@@ -561,3 +561,26 @@ async def mark_cart_reminded(db: AsyncSession, cart_items: list[CartItem]) -> No
     for item in cart_items:
         item.reminded_at = now
     await db.commit()
+
+
+async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
+    """Injects live real-time ERP stock inventory into the AI's knowledge base."""
+    products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)
+    products_res = await db.execute(products_stmt)
+    live_products = products_res.scalars().all()
+
+    # A business that sells no products through the bot (a clinic, a salon, a venue) gets no
+    # inventory block at all. It used to be told "No products currently listed", which the bot
+    # then repeated to customers asking what the business offers.
+    if not live_products:
+        return tenant.knowledge_base or ""
+
+    # Prices are in the tenant's own currency (this printed "$" for every business).
+    currency = f"{tenant.currency} " if tenant.currency else ""
+    inventory_str = "\n\n--- LIVE ERP INVENTORY ---\n"
+    for p in live_products:
+        status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
+        inventory_str += f"- {p.name}: {currency}{p.price:,.2f} ({status})\n"
+    inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
+
+    return (tenant.knowledge_base or "") + inventory_str

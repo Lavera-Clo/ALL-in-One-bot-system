@@ -25,7 +25,7 @@ from business_idea_service import generate_business_ideas, create_pdf_from_text
 
 from config import settings
 from database import init_db, get_db, AsyncSessionLocal
-from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession
+from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun
 
 from schemas import (
     TenantCreate,
@@ -44,10 +44,18 @@ from schemas import (
     AdminUserResponse,
     BotProfileUpdate,
     TenantDocumentUpdate,
-    BotPreviewRequest
+    BotPreviewRequest,
+    GapAnswerRequest,
+    TeachRequest,
+)
+from learning_service import answer_gap, dismiss_gap, gap_payload, get_gap, list_gaps, record_gap, teach
+from self_test_service import recover_interrupted_runs, run_payload, run_self_test, start_run as start_test_run
+from understanding_service import (
+    recover_interrupted as recover_interrupted_understanding, understand_business, understanding_payload,
 )
 from ai_service import (
-    generate_ai_response, get_pdfs_for_user_message, resolve_reply_documents, DOC_REQUEST_WORDS,
+    generate_ai_response, generate_bot_reply, detect_language_intent,
+    get_pdfs_for_user_message, resolve_reply_documents, DOC_REQUEST_WORDS,
     transcribe_audio, classify_product_from_image,
 )
 from whatsapp_client import (
@@ -81,7 +89,8 @@ from order_service import (
     get_low_stock_products,
     get_broadcast_recipients,
     get_abandoned_carts,
-    mark_cart_reminded
+    mark_cart_reminded,
+    get_dynamic_kb,
 )
 from auth_service import hash_password, verify_password, generate_session_token, session_expiry
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
@@ -89,7 +98,7 @@ from invoice_service import generate_invoice_pdf
 from realtime import manager as ws_manager
 from rate_limit import RateLimitMiddleware
 from bot_profile_generator import generate_bot_profile
-from bot_learning import get_cached_answer, cache_qa_pair, record_signal, get_learning_stats
+from bot_learning import get_learning_stats
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO)
@@ -108,6 +117,10 @@ async def lifespan(app: FastAPI):
     interrupted = await recover_interrupted_trainings()
     if interrupted:
         logger.warning(f"{interrupted} document training job(s) were interrupted by the restart.")
+    await recover_interrupted_understanding()
+    interrupted_tests = await recover_interrupted_runs()
+    if interrupted_tests:
+        logger.warning(f"{interrupted_tests} bot test run(s) were interrupted by the restart.")
 
     # Automatically seed Wasala Nature Resort tenant if not present
     async with AsyncSessionLocal() as session:
@@ -644,8 +657,11 @@ async def update_bot_profile(
     # Choosing a different industry brings that industry's personality with it, unless this same
     # request names another one.
     new_industry = changes.get("industry")
-    if new_industry and new_industry != build_bot_config(tenant).industry and not changes.get("persona_template"):
-        changes["persona_template"] = ""
+    if new_industry and new_industry != build_bot_config(tenant).industry:
+        if not changes.get("persona_template"):
+            changes["persona_template"] = ""
+        # The owner picked it: automatic understanding will suggest, never change it again.
+        tenant.industry_source = "owner"
 
     for field, value in changes.items():
         if value is not None:
@@ -797,6 +813,39 @@ async def delete_tenant_document(
     return {"message": "Document deleted and knowledge base rebuilt."}
 
 
+@app.get("/api/tenants/{tenant_id}/understanding", tags=["Bot Portal"])
+async def get_business_understanding(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """What the system worked out about this business from its documents: industry, confidence, evidence."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    return understanding_payload(tenant)
+
+
+@app.post("/api/tenants/{tenant_id}/understand", tags=["Bot Portal"])
+async def recheck_business_understanding(
+    tenant_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Work out the business type again from the current documents, fill empty profile fields, then re-test."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    kb = (tenant.knowledge_base or "").strip()
+    if not kb or kb == "No business documentation has been uploaded yet.":
+        raise HTTPException(status_code=400, detail="Upload at least one document first - that is what the system reads.")
+    background_tasks.add_task(understand_business, tenant.id)
+    return {"message": "Reading your documents again. This takes about a minute."}
+
+
+@app.get("/api/industries", tags=["Bot Portal"])
+async def list_industries(admin: AdminUser = Depends(get_current_admin)):
+    """The industries a business can be set up as (see industry_brain.py)."""
+    return INDUSTRY_CHOICES
+
+
 @app.get("/api/ai/providers", tags=["Bot Portal"])
 async def ai_provider_status(admin: AdminUser = Depends(get_current_admin)):
     """Which AI providers are configured, which are paused (rate-limited / no quota), and usage."""
@@ -812,29 +861,6 @@ async def rebuild_tenant_knowledge_base(
     tenant = await _get_tenant_or_404(db, tenant_id)
     knowledge_base = await rebuild_knowledge_base(db, tenant)
     return {"message": "Knowledge base rebuilt.", "knowledge_base": knowledge_base}
-
-
-async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
-    """Injects live real-time ERP stock inventory into the AI's knowledge base."""
-    products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)
-    products_res = await db.execute(products_stmt)
-    live_products = products_res.scalars().all()
-
-    # A business that sells no products through the bot (a clinic, a salon, a venue) gets no
-    # inventory block at all. It used to be told "No products currently listed", which the bot
-    # then repeated to customers asking what the business offers.
-    if not live_products:
-        return tenant.knowledge_base or ""
-
-    # Prices are in the tenant's own currency (this printed "$" for every business).
-    currency = f"{tenant.currency} " if tenant.currency else ""
-    inventory_str = "\n\n--- LIVE ERP INVENTORY ---\n"
-    for p in live_products:
-        status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
-        inventory_str += f"- {p.name}: {currency}{p.price:,.2f} ({status})\n"
-    inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
-
-    return (tenant.knowledge_base or "") + inventory_str
 
 
 @app.post("/api/tenants/{tenant_id}/preview", tags=["Bot Portal"])
@@ -854,15 +880,129 @@ async def preview_bot_reply(
     
     dynamic_kb = await get_dynamic_kb(tenant, db)
 
-    reply, is_handoff = await generate_ai_response(
+    bot_reply = await generate_bot_reply(
         system_prompt=tenant.system_prompt,
         knowledge_base=dynamic_kb,
         chat_history=[],
         user_message=payload.message,
         config=config,
     )
-    reply, attachments = resolve_reply_documents(reply, payload.message, config)
-    return {"reply": reply, "handoff": is_handoff, "attachments": attachments}
+    reply, attachments = resolve_reply_documents(bot_reply.text, payload.message, config)
+    # `unknown` lets the portal offer "teach the bot this answer" right under the reply.
+    return {"reply": reply, "handoff": bot_reply.handoff, "unknown": bot_reply.unknown, "attachments": attachments}
+
+
+# ---------------------------------------------------------------------------
+# Automatic testing — runs the bot on questions from its own documents
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tenants/{tenant_id}/self-test", tags=["Bot Testing"])
+async def start_self_test(
+    tenant_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Start an automatic test of this business's bot. Poll GET .../self-test for progress and results."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    try:
+        run = await start_test_run(db, tenant)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    background_tasks.add_task(run_self_test, run.id)
+    return {"message": "Test started. It usually takes 1-2 minutes.", "run": run_payload(run)}
+
+
+@app.get("/api/tenants/{tenant_id}/self-test", tags=["Bot Testing"])
+async def get_self_test(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """The latest test run, plus the score of the one before it for comparison."""
+    await _get_tenant_or_404(db, tenant_id)
+    runs = (await db.execute(
+        select(BotTestRun).where(BotTestRun.tenant_id == tenant_id).order_by(BotTestRun.id.desc()).limit(5)
+    )).scalars().all()
+    latest = runs[0] if runs else None
+    previous = next((r for r in runs[1:] if r.status == "done"), None)
+    return {"run": run_payload(latest), "previous_score": previous.score if previous else None}
+
+
+# ---------------------------------------------------------------------------
+# Learning from real chats — questions the bot couldn't answer, answered by the owner
+# ---------------------------------------------------------------------------
+
+async def _get_gap_or_404(db: AsyncSession, tenant_id: int, gap_id: int):
+    gap = await get_gap(db, tenant_id, gap_id)
+    if not gap:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return gap
+
+
+@app.get("/api/tenants/{tenant_id}/gaps", tags=["Bot Learning"])
+async def list_knowledge_gaps(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Questions customers asked that the bot couldn't answer (open), and the answers taught so far."""
+    await _get_tenant_or_404(db, tenant_id)
+    gaps = await list_gaps(db, tenant_id)
+    return {
+        "open": [gap_payload(g) for g in gaps if g.status == "open"],
+        "answered": [gap_payload(g) for g in gaps if g.status == "answered"],
+        "dismissed_count": sum(1 for g in gaps if g.status == "dismissed"),
+    }
+
+
+@app.post("/api/tenants/{tenant_id}/gaps/{gap_id}/answer", tags=["Bot Learning"])
+async def answer_knowledge_gap(
+    tenant_id: int,
+    gap_id: int,
+    payload: GapAnswerRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Teach the bot the answer. It joins the knowledge base, so the next customer gets it."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    gap = await _get_gap_or_404(db, tenant_id, gap_id)
+    try:
+        gap = await answer_gap(db, tenant, gap, payload.answer, payload.question or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info(f"Tenant {tenant.id}: {admin.username} answered question #{gap.id}.")
+    return {"message": "Answer saved. The bot will use it from now on.", "gap": gap_payload(gap)}
+
+
+@app.post("/api/tenants/{tenant_id}/gaps/{gap_id}/dismiss", tags=["Bot Learning"])
+async def dismiss_knowledge_gap(
+    tenant_id: int,
+    gap_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Ignore an open question, or remove an answer the bot was taught."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    gap = await _get_gap_or_404(db, tenant_id, gap_id)
+    await dismiss_gap(db, tenant, gap)
+    return {"message": "Removed."}
+
+
+@app.post("/api/tenants/{tenant_id}/teach", tags=["Bot Learning"])
+async def teach_bot_answer(
+    tenant_id: int,
+    payload: TeachRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin)
+):
+    """Teach a question and answer directly (for example from a failed test question)."""
+    tenant = await _get_tenant_or_404(db, tenant_id)
+    try:
+        gap = await teach(db, tenant, payload.question, payload.answer)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "Answer saved. The bot will use it from now on.", "gap": gap_payload(gap)}
 
 
 # ---------------------------------------------------------------------------
@@ -1627,13 +1767,14 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     dynamic_kb = await get_dynamic_kb(tenant, db)
 
                     # Generate Multilingual AI Response (gpt-4o-mini / Local Simulator)
-                    ai_reply, is_handoff_requested = await generate_ai_response(
+                    bot_reply = await generate_bot_reply(
                         system_prompt=tenant.system_prompt,
                         knowledge_base=dynamic_kb,
                         chat_history=formatted_history,
                         user_message=user_text,
                         config=bot_config
                     )
+                    ai_reply, is_handoff_requested = bot_reply.text, bot_reply.handoff
 
                     # Remove every [SEND_DOC: ...] tag from the text and pick this tenant's files to
                     # attach: the AI's choice if it named one of THIS tenant's documents, otherwise
@@ -1657,15 +1798,14 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     db.add(ai_history)
                     await db.commit()
 
-                    # Self-learning: cache the Q&A pair for future fuzzy matching
-                    try:
-                        await cache_qa_pair(db, tenant.id, user_text, ai_reply)
-                        if is_handoff_requested:
-                            await record_signal(db, tenant.id, user_text, is_positive=False)
-                        else:
-                            await record_signal(db, tenant.id, user_text, is_positive=True)
-                    except Exception:
-                        pass  # learning is best-effort, never block the reply
+                    # Learning from real chats: a question the documents don't cover goes on the
+                    # owner's "Questions to answer" list. Once they answer it, every later customer
+                    # gets that answer. (This replaced caching the bot's own replies, which were
+                    # stored on every message but never safe to reuse.)
+                    if bot_reply.unknown:
+                        await record_gap(db, tenant.id, user_text, bot_reply=ai_reply,
+                                         language=detect_language_intent(user_text, formatted_history),
+                                         customer_phone=customer_phone)
 
                     # Send AI response back to customer via Meta Cloud API
                     await send_whatsapp_message(
@@ -1848,6 +1988,9 @@ async def create_tenant(tenant_in: TenantCreate, db: AsyncSession = Depends(get_
         )
 
     new_tenant = Tenant(**tenant_in.model_dump())
+    # An industry picked on creation is the owner's choice; without one, the system works it out
+    # from the documents once they are trained (understanding_service.py).
+    new_tenant.industry_source = "owner" if new_tenant.industry else "auto"
     db.add(new_tenant)
     await db.commit()
     await db.refresh(new_tenant)

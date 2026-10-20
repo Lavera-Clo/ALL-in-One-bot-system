@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from openai import AsyncOpenAI
 from config import settings
@@ -592,6 +593,24 @@ def unsupported_reply_numbers(reply: str, allowed_text: str, config) -> List[str
     return sorted({n for n in numbers_in(check) if n not in allowed})
 
 
+def _has_knowledge(knowledge_base: str) -> bool:
+    from training_service import EMPTY_KNOWLEDGE_BASE
+    text = (knowledge_base or "").strip()
+    return bool(text) and text != EMPTY_KNOWLEDGE_BASE
+
+
+def no_knowledge_reply(lang: str, config) -> str:
+    """For a business with nothing uploaded yet: promise a person, never an answer."""
+    contacts = config.contact_lines() if config else ""
+    if lang == "sinhala":
+        text = "ඔබගේ පණිවිඩයට ස්තුතියි! මම මේ ගැන අපේ කණ්ඩායමෙන් විමසා ඔබට දන්වන්නම් 🙏"
+    elif lang == "singlish":
+        text = "Message ekata sthuthi! Man meka ape team eken ahala oyata kiyannam 🙏"
+    else:
+        text = "Thanks for your message! Let me check that with our team and get back to you 🙏"
+    return f"{text}\n\n{contacts}".strip() if contacts else text
+
+
 def safe_unknown_reply(lang: str, config) -> str:
     """Used when the model keeps stating figures we can't verify: say so honestly, offer a human."""
     contacts = config.contact_lines() if config else ""
@@ -649,6 +668,42 @@ def resolve_reply_documents(reply: str, user_message: str, config) -> Tuple[str,
     return clean, chosen
 
 
+@dataclass
+class BotReply:
+    text: str
+    handoff: bool = False
+    # The knowledge base did not have the answer. Real chats record these as KnowledgeGaps,
+    # so the owner can teach the bot (see learning_service.py).
+    unknown: bool = False
+
+
+# Added by the model at the end of a reply when the knowledge base lacked the answer. Tolerant
+# of the spacing and case models use. Always removed before a customer sees the reply.
+_UNKNOWN_TAG_RE = re.compile(r"\[\s*NOT[\s_]*IN[\s_]*KNOWLEDGE[\s_]*BASE\s*\]", re.IGNORECASE)
+
+
+# Backup for when the model admits it doesn't know but forgets the tag (measured: "I honestly am
+# not sure if we have dedicated parking... let me check with the front desk team" came untagged).
+# Only used on replies that are not hand-offs, so "our manager will sort out the discount" is
+# never filed as a missing fact. A false match costs the owner one "Ignore" click.
+_UNSURE_RE = re.compile(
+    r"not (?:\w+ )?sure|don'?t (?:have|know) (?:that|this|the exact|those|any)? ?(?:detail|info|information|number|figure)"
+    r"|don'?t know|let me (?:check|confirm|find out)|i'?ll (?:check|confirm|find out)"
+    r"|check (?:that |this |it )?with (?:the|our) (?:\w+ )?(?:team|desk|manager|staff)"
+    r"|team eken (?:ahala|check)|danne naha|dannawa naha|කණ්ඩායමෙන් විමසා|තහවුරු කරගන්නම්|දන්නේ නැහැ",
+    re.IGNORECASE,
+)
+
+
+def _sounds_unsure(text: str) -> bool:
+    return bool(_UNSURE_RE.search(text or ""))
+
+
+def _take_unknown_tag(text: str) -> Tuple[str, bool]:
+    found = bool(_UNKNOWN_TAG_RE.search(text or ""))
+    return (_UNKNOWN_TAG_RE.sub("", text or "").strip(), found)
+
+
 async def generate_ai_response(
     system_prompt: str,
     knowledge_base: str,
@@ -656,6 +711,18 @@ async def generate_ai_response(
     user_message: str,
     config=None
 ) -> Tuple[str, bool]:
+    """(reply text, hand-off requested). See generate_bot_reply, which also says whether the bot knew the answer."""
+    reply = await generate_bot_reply(system_prompt, knowledge_base, chat_history, user_message, config)
+    return reply.text, reply.handoff
+
+
+async def generate_bot_reply(
+    system_prompt: str,
+    knowledge_base: str,
+    chat_history: List[Dict[str, str]],
+    user_message: str,
+    config=None
+) -> BotReply:
     """
     Generates AI response using OpenAI gpt-4o-mini, with automatic fallback
     to Smart Knowledge-Base Simulator if OpenAI key is unconfigured or credits exhausted.
@@ -668,12 +735,21 @@ async def generate_ai_response(
         from tenant_config import BotConfig
         config = BotConfig(tenant_id=0, business_name="our business")
 
+    # A business that hasn't uploaded anything yet has nothing true to say about itself. Measured:
+    # with an empty knowledge base, a model told two customers "Yes, we have a pharmacy right
+    # inside the clinic". So until there is knowledge, every real question goes to the team and
+    # onto the owner's list — only greetings get a normal reply.
+    if not _has_knowledge(knowledge_base) and not is_pure_greeting(user_message):
+        lang = detect_language_intent(user_message, chat_history)
+        has_contact = config.has_manager or config.has_front_office
+        return BotReply(no_knowledge_reply(lang, config), handoff=has_contact, unknown=True)
+
     # No AI provider configured at all -> keyword simulator straight away.
     if not llm_router.role_candidates("chat"):
         reply = smart_knowledge_base_search(user_message, knowledge_base, system_prompt, chat_history, config)
         is_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply
         reply = reply.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
-        return reply, is_handoff
+        return BotReply(reply, is_handoff)
 
     # Reply through the multi-provider router (Groq -> Gemini -> OpenRouter -> ...).
     try:
@@ -741,7 +817,7 @@ async def generate_ai_response(
             "1. GIBBERISH DETECTION: If the customer sends random characters (e.g., 'asdfg', 'ffsdsff'), do NOT try to answer. Politely say: 'Sorry, I didn't quite catch that 😅 Could you rephrase what you need?'\n"
             "2. REPEATED QUESTIONS: If the customer asks the exact same question they already asked earlier in the chat history, do NOT just dump the same answer again. Acknowledge it by saying 'You actually asked about this earlier — here's what I shared:' and summarize the past answer briefly, asking if they need more specific details.\n"
             "3. RETURNING CUSTOMERS: If the customer says 'Hi' and there are previous messages in the chat history, greet them as a returning customer ('Welcome back! Last time we were chatting about [Topic]. How can I help today?').\n"
-            "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team. Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Only ask them to rephrase if their message was genuinely unclear.\n"
+            "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know — never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely unclear.\n"
             "------------------------------------------\n"
         )
 
@@ -750,6 +826,21 @@ async def generate_ai_response(
 
         # What customers of this kind of business need, and what it must never say.
         industry_playbook = playbook_prompt(config.pack)
+
+        # The owner's own playbook (example chats, sales approach), when they uploaded one.
+        # Its prices were blanked to "[amount]" in training: style comes from here, facts never do.
+        owner_playbook = ""
+        if config.playbook:
+            from playbook_pipeline import MAX_PLAYBOOK_CHARS
+            owner_playbook = (
+                "--- THIS BUSINESS'S CONVERSATION PLAYBOOK (how the owner wants chats to go) ---\n"
+                "Follow these goals, style and sales approach - they come from the owner and take priority over the "
+                "general persona examples. The example conversations show HOW to talk, never WHAT is true: every "
+                "price, date, product and policy must come from the knowledge base, and \"[amount]\" marks a figure "
+                "you must look up there or say you'll confirm. Never copy an example reply word for word.\n"
+                f"{config.playbook[:MAX_PLAYBOOK_CHARS]}\n"
+                "------------------------------------------\n\n"
+            )
 
         # Only the knowledge-base sections this message needs (see kb_retrieval.py).
         kb_context, kb_info = await select_context(knowledge_base, user_message, chat_history)
@@ -760,6 +851,7 @@ async def generate_ai_response(
             f"{persona_prompt}\n\n"
             f"{system_prompt}\n\n"
             f"{industry_playbook}\n\n"
+            f"{owner_playbook}"
             f"--- KNOWLEDGE BASE (the parts relevant to this message) ---\n"
             f"{kb_context}\n"
             f"----------------------\n"
@@ -775,7 +867,7 @@ async def generate_ai_response(
 
         result = await llm_router.complete("chat", messages, max_tokens=1500, temperature=0.7, timeout=45)
         logger.info(f"[chat] reply by {result.label} in {result.latency:.1f}s")
-        reply_content = whatsapp_format(result.text.strip())
+        reply_content, is_unknown = _take_unknown_tag(whatsapp_format(result.text.strip()))
 
         # Number guard: every price, count, time or date the bot states must exist in the
         # knowledge base, the owner's own settings, or the conversation. Models occasionally
@@ -796,23 +888,27 @@ async def generate_ai_response(
                 "needs a figure the knowledge base doesn't have, say you'll confirm it with the team.")}
             try:
                 retry = await llm_router.complete("chat", strict, max_tokens=1500, temperature=0.2, timeout=45)
-                reply_content = whatsapp_format(retry.text.strip())
+                reply_content, retry_unknown = _take_unknown_tag(whatsapp_format(retry.text.strip()))
+                is_unknown = is_unknown or retry_unknown
                 invented = unsupported_reply_numbers(reply_content, allowed_text, config)
             except llm_router.LLMUnavailable:
                 pass
             if invented:
                 logger.warning(f"[chat] redraft still had unsupported numbers {invented}; sending a safe reply")
-                return safe_unknown_reply(lang, config), True
+                # The figure they asked for isn't in the knowledge base: that is a gap to fill too.
+                return BotReply(safe_unknown_reply(lang, config), handoff=True, unknown=True)
         is_human_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply_content
         reply_content = reply_content.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
-        return reply_content, is_human_handoff
+        if not is_unknown and not is_human_handoff and _sounds_unsure(reply_content):
+            is_unknown = True
+        return BotReply(reply_content, is_human_handoff, is_unknown)
 
     except Exception as e:
         logger.warning(f"All AI providers failed ({e}). Using Smart Knowledge-Base Simulator fallback.")
         reply = smart_knowledge_base_search(user_message, knowledge_base, system_prompt, chat_history, config)
         is_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply
         reply = reply.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
-        return reply, is_handoff
+        return BotReply(reply, is_handoff)
 
 
 async def classify_product_from_image(image_bytes: bytes, products: list) -> dict:

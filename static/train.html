@@ -93,6 +93,18 @@
         .badge-send { background: rgba(245,158,11,0.18); color: #fcd34d; }
         .badge-both { background: rgba(16,185,129,0.18); color: #6ee7b7; }
         .badge-off  { background: rgba(148,163,184,0.18); color: #cbd5e1; }
+        .badge-play { background: rgba(139,92,246,0.22); color: #c4b5fd; }
+        .step { display: flex; gap: 0.85rem; padding: 0.75rem 0; border-top: 1px solid var(--card-border); }
+        .step:first-child { border-top: none; padding-top: 0.2rem; }
+        .step-num { flex: 0 0 1.8rem; height: 1.8rem; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 0.85rem; background: rgba(255,255,255,0.06); border: 1px solid var(--card-border); }
+        .step-num.done { background: rgba(16,185,129,0.2); border-color: var(--accent); color: #6ee7b7; }
+        .step-num.busy { border-color: var(--primary); }
+        .step-body { flex: 1; min-width: 0; font-size: 0.9rem; line-height: 1.5; }
+        .step-body b.title { display: block; margin-bottom: 0.15rem; }
+        .conf-high { color: #6ee7b7; } .conf-medium { color: #fcd34d; } .conf-low { color: #fca5a5; }
+        .evidence { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.35rem; }
+        .suggest { margin-top: 0.5rem; padding: 0.6rem 0.8rem; border-radius: 0.5rem; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); }
 
         .kb-preview { background: rgba(0,0,0,0.35); border-radius: 0.5rem; padding: 1.1rem; font-family: ui-monospace, monospace;
             white-space: pre-wrap; font-size: 0.82rem; color: #cbd5e1; max-height: 460px; overflow-y: auto; line-height: 1.55; }
@@ -135,6 +147,22 @@
         .chip { font-size: 0.75rem; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.04); }
         .chip.ok i { color: var(--accent); }
         .chip.paused { color: #fcd34d; }
+        .business-bar { display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+        .count-pill { background: var(--danger); color: #fff; border-radius: 999px; font-size: 0.7rem; padding: 0.05rem 0.45rem; margin-left: 0.25rem; }
+        .score { font-size: 2.2rem; font-weight: 800; line-height: 1; }
+        .score.good { color: #6ee7b7; } .score.ok { color: #fcd34d; } .score.bad { color: #fca5a5; }
+        .result { border: 1px solid var(--card-border); border-left: 4px solid var(--accent); border-radius: 0.6rem;
+            padding: 0.8rem 1rem; margin-bottom: 0.7rem; background: rgba(15,23,42,0.45); }
+        .result.fail { border-left-color: var(--danger); }
+        .result .q { font-weight: 600; }
+        .result .src { color: var(--text-muted); font-size: 0.75rem; margin-bottom: 0.25rem; }
+        .result .problems { color: #fca5a5; font-size: 0.84rem; margin-top: 0.4rem; }
+        .result details { margin-top: 0.45rem; font-size: 0.85rem; }
+        .result summary { cursor: pointer; color: var(--text-muted); }
+        .result .pair { white-space: pre-wrap; line-height: 1.5; margin-top: 0.4rem; }
+        .gap { border: 1px solid var(--card-border); border-radius: 0.7rem; padding: 1rem; margin-bottom: 0.9rem; background: rgba(15,23,42,0.45); }
+        .gap .asked { color: var(--warn); font-size: 0.78rem; font-weight: 700; }
+        .gap .said { color: var(--text-muted); font-size: 0.84rem; margin: 0.35rem 0 0.7rem; white-space: pre-wrap; }
     </style>
 </head>
 <body>
@@ -168,9 +196,40 @@
         <p>Upload your menus, price lists and policies. Every upload is <b>added</b> to what the bot already knows — nothing you trained before is lost.</p>
     </div>
 
-    <div class="field" style="max-width:420px">
-        <label>Business</label>
-        <select class="form-control" id="tenantSelect"></select>
+    <div class="business-bar">
+        <div class="field" style="flex:1;max-width:420px;margin:0">
+            <label>Business</label>
+            <select class="form-control" id="tenantSelect"></select>
+        </div>
+        <button class="btn btn-ghost" id="newBizToggle"><i class="fa-solid fa-plus"></i> New business</button>
+    </div>
+
+    <!-- NEW BUSINESS -->
+    <div class="card" id="newBizCard" style="display:none">
+        <h2><i class="fa-solid fa-store"></i> Add a new business</h2>
+        <p class="hint">Creates a separate bot with its own documents, profile and WhatsApp number. After this, upload its documents, then run the automatic test before going live.</p>
+        <div class="grid2">
+            <div><label>Business name *</label><input class="form-control" id="nb_name" placeholder="e.g. City Care Medical Centre"></div>
+            <div><label>Industry</label><select class="form-control" id="nb_industry"></select></div>
+            <div><label>Location</label><input class="form-control" id="nb_location" placeholder="e.g. Colombo 03, Sri Lanka"></div>
+            <div><label>Currency</label><input class="form-control" id="nb_currency" value="LKR"></div>
+            <div><label>Manager's WhatsApp number</label><input class="form-control" id="nb_manager" placeholder="+94771234567"></div>
+            <div><label>Hotline / front desk number</label><input class="form-control" id="nb_hotline" placeholder="+94112345678"></div>
+        </div>
+        <p class="hint" style="margin-bottom:0.8rem">From Meta for Developers → WhatsApp → API Setup. Not ready yet? Leave these empty: the business is created in test mode (nothing is sent to WhatsApp), and you can add them later.</p>
+        <div class="grid2">
+            <div><label>WhatsApp Phone Number ID</label><input class="form-control" id="nb_phone_id" placeholder="e.g. 109876543210987"></div>
+            <div><label>Meta access token</label><input class="form-control" id="nb_token" type="password" autocomplete="off" placeholder="EAA..."></div>
+        </div>
+        <div class="field">
+            <label>Documents (optional): price lists, menus, brochures, or example chats</label>
+            <input class="form-control" id="nb_files" type="file" multiple accept=".pdf,.txt">
+            <p class="hint" style="margin:0.4rem 0 0">Add them now and the rest is automatic: the bot trains, works out what kind of business this is, fills in its profile, and tests itself.</p>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <button class="btn btn-primary" id="newBizBtn"><i class="fa-solid fa-check"></i> Create business</button>
+            <button class="btn btn-ghost" id="newBizCancel">Cancel</button>
+        </div>
     </div>
 
     <div class="tabs">
@@ -178,10 +237,17 @@
         <div class="tab" data-panel="profile"><i class="fa-regular fa-id-badge"></i> Bot profile</div>
         <div class="tab" data-panel="kb"><i class="fa-solid fa-book"></i> Knowledge base</div>
         <div class="tab" data-panel="test"><i class="fa-regular fa-comments"></i> Test the bot</div>
+        <div class="tab" data-panel="learn"><i class="fa-solid fa-graduation-cap"></i> Questions to answer <span class="count-pill" id="gapCount" style="display:none"></span></div>
     </div>
 
     <!-- DOCUMENTS -->
     <div class="panel active" id="panel-docs">
+        <div class="card" id="setupCard">
+            <h2><i class="fa-solid fa-list-check"></i> Setup</h2>
+            <p class="hint">Runs by itself every time a document finishes training.</p>
+            <div id="setupSteps"><div class="muted">Loading…</div></div>
+        </div>
+
         <div class="card">
             <h2><i class="fa-solid fa-plus"></i> Add a document</h2>
             <p class="hint">Upload a PDF, or paste text. Several AI models read it — including scanned pages and price tables — list every fact and cross-check each other, and every price is verified against your document before the bot may use it.</p>
@@ -211,7 +277,9 @@
                         <option value="both">Answer from it AND send the PDF</option>
                         <option value="knowledge">Answer from it only</option>
                         <option value="sendable">Send the PDF only</option>
+                        <option value="playbook">Conversation playbook: how to talk &amp; sell (example chats)</option>
                     </select>
+                    <div class="muted" style="font-size:0.78rem;margin-top:0.3rem">Documents of example chats are recognised as playbooks automatically.</div>
                 </div>
             </div>
 
@@ -285,6 +353,13 @@
     <!-- TEST -->
     <div class="panel" id="panel-test">
         <div class="card">
+            <h2><i class="fa-solid fa-clipboard-check"></i> Automatic test</h2>
+            <p class="hint">Asks the bot the questions from your own documents' FAQs, plus checks every bot must pass (admitting what it doesn't know, passing discounts and risky questions to a person). Each reply is checked for the right facts, made-up numbers and the customer's language. Run it before going live and after changing documents. Nothing is sent to WhatsApp.</p>
+            <button class="btn btn-primary" id="selfTestBtn"><i class="fa-solid fa-play"></i> Run full test</button>
+            <div id="selfTestOut" style="margin-top:1.1rem"></div>
+        </div>
+
+        <div class="card">
             <h2><i class="fa-regular fa-comments"></i> Ask the bot a question</h2>
             <p class="hint">Runs the real bot against this business's profile and documents. Nothing is sent to WhatsApp.</p>
             <div class="field">
@@ -293,6 +368,27 @@
             <button class="btn btn-primary" id="testBtn"><i class="fa-solid fa-paper-plane"></i> Send test message</button>
             <div class="loader" id="testLoader"></div>
             <div id="testOutput" style="margin-top:1.25rem"></div>
+        </div>
+    </div>
+
+    <!-- LEARNING -->
+    <div class="panel" id="panel-learn">
+        <div class="card">
+            <h2><i class="fa-solid fa-graduation-cap"></i> Questions the bot couldn't answer</h2>
+            <p class="hint">When a customer asks something your documents don't cover, the bot tells them it will check, and the question lands here. Type the answer once and every later customer gets it. The bot only ever learns what you write here, never its own guesses.</p>
+            <div id="gapList"><div class="empty">Loading…</div></div>
+        </div>
+        <div class="card">
+            <h2><i class="fa-solid fa-chalkboard-user"></i> Teach an answer yourself</h2>
+            <p class="hint">Know a question customers will ask that isn't in your documents? Add it before they ask.</p>
+            <div class="field"><label>Question</label><input class="form-control" id="teachQ" placeholder="e.g. Is there parking?"></div>
+            <div class="field"><label>Answer</label><textarea class="form-control" id="teachA" style="min-height:80px" placeholder="e.g. Yes, free parking for about 80 cars next to the hall."></textarea></div>
+            <button class="btn btn-primary" id="teachBtn"><i class="fa-solid fa-floppy-disk"></i> Save answer</button>
+        </div>
+        <div class="card">
+            <h2><i class="fa-solid fa-check-double"></i> Answers you've taught</h2>
+            <p class="hint">These are part of the knowledge base now. Remove one and the bot stops using it.</p>
+            <div id="taughtList"><div class="empty">Nothing taught yet.</div></div>
         </div>
     </div>
 </div>
@@ -420,7 +516,7 @@ $('uploadBtn').addEventListener('click', async () => {
         loadProviders();
         fileInput.value = ''; showFileName();
         $('pasteText').value = ''; $('docTitle').value = '';
-        await loadDocuments();
+        await Promise.all([loadDocuments(), loadSetup()]);
     } catch (err) { toast(err.message, false); }
     finally { $('uploadBtn').disabled = false; $('uploadLoader').style.display = 'none'; }
 });
@@ -432,6 +528,7 @@ let needsFullRender = false;
 
 function typeBadge(doc) {
     if (!doc.is_active) return '<span class="badge badge-off">OFF</span>';
+    if (doc.doc_type === 'playbook') return '<span class="badge badge-play">PLAYBOOK</span>';
     if (doc.doc_type === 'knowledge') return '<span class="badge badge-read">READS</span>';
     if (doc.doc_type === 'sendable') return '<span class="badge badge-send">SENDS</span>';
     return '<span class="badge badge-both">READS + SENDS</span>';
@@ -462,6 +559,13 @@ function statusHtml(doc) {
         return `<div class="train-status legacy"><i class="fa-regular fa-circle"></i> Not trained with the AI pipeline yet —
             <a href="#" data-act="retrain" data-id="${doc.id}" style="color:var(--primary)">train it now</a></div>`;
     }
+    if (r.kind === 'playbook') {
+        const pb = [`${r.goals || 0} goals`, `${r.rules || 0} rules`, `${r.examples || 0} example chats`];
+        if (r.amounts_hidden) pb.push(`${r.amounts_hidden} example prices hidden`);
+        const conflicts = (r.amounts_not_in_knowledge_base || []).length;
+        return `<div class="train-status ready"><i class="fa-solid fa-circle-check"></i> Learned how to talk · ${pb.join(' · ')}
+            ${conflicts ? ` · <span style="color:var(--warn)">${conflicts} price(s) differ from your documents</span>` : ''}</div>`;
+    }
     const bits = [];
     if (r.facts != null) bits.push(`${r.facts} facts`);
     if (r.numbers_verified != null) bits.push(`${r.numbers_verified} prices &amp; numbers verified`);
@@ -477,9 +581,25 @@ function listHtml(items, render) {
     return `<ul>${items.map((x) => `<li>${render(x)}</li>`).join('')}</ul>`;
 }
 
+function playbookReportHtml(r) {
+    const parts = [
+        `<dt>Learned</dt><dd>${r.goals || 0} conversation goals · ${r.rules || 0} style, sales &amp; hand-over rules ·
+            ${r.objections || 0} objections · ${r.examples || 0} example chats<br><span class="muted">by ${escapeHtml(r.model || '—')}</span></dd>`,
+        `<dt>Prices</dt><dd>${r.amounts_hidden || 0} price(s) in the example replies replaced with [amount]: the bot copies the
+            style of an answer, and always takes the figure from your price documents.</dd>`,
+    ];
+    if ((r.amounts_not_in_knowledge_base || []).length) {
+        parts.push(`<dd class="warn-text">These amounts appear in the playbook but not in your price documents. Check which is right:
+            <b>${r.amounts_not_in_knowledge_base.map(escapeHtml).join(', ')}</b></dd>`);
+    }
+    parts.push(`<dt>Time</dt><dd>${r.duration_seconds ?? '—'} seconds</dd>`);
+    return `<div class="field"><label>How the AI trained on this playbook</label><dl class="report">${parts.join('')}</dl></div>`;
+}
+
 function reportHtml(doc) {
     const r = doc.training_report;
     if (!r) return '';
+    if (r.kind === 'playbook') return playbookReportHtml(r);
     const rd = r.reader || {};
     const methodText = {
         'vision': 'AI vision (reads scanned pages and tables)',
@@ -545,16 +665,16 @@ function renderDocuments(documents) {
             </div>
             <div class="doc-body ${open.has('body-' + doc.id) ? 'open' : ''}" id="body-${doc.id}">
                 ${reportHtml(doc)}
-                <div class="field">
+                <div class="field" ${doc.doc_type === 'playbook' ? 'style="display:none"' : ''}>
                     <label>Send this file when a customer says any of these (comma separated)</label>
                     <input class="form-control" id="kw-${doc.id}" value="${escapeHtml(doc.trigger_keywords)}">
                 </div>
-                <div class="field">
+                <div class="field" ${doc.doc_type === 'playbook' ? 'style="display:none"' : ''}>
                     <label>Caption shown when the file is sent</label>
                     <input class="form-control" id="cap-${doc.id}" value="${escapeHtml(doc.caption || '')}">
                 </div>
                 <div class="field">
-                    <label>What the bot learned from this document (you can correct it)</label>
+                    <label>${doc.doc_type === 'playbook' ? 'How the bot learned to talk (you can correct it)' : 'What the bot learned from this document (you can correct it)'}</label>
                     <textarea class="form-control" id="sum-${doc.id}" style="min-height:220px">${escapeHtml(doc.summary)}</textarea>
                 </div>
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
@@ -751,12 +871,356 @@ $('testBtn').addEventListener('click', async () => {
             <div class="chat-line bot"><b>Bot:</b> ${escapeHtml(data.reply)}
                 ${attachments ? `<div class="chat-attach">${attachments}</div>` : ''}
                 ${data.handoff ? '<div class="chat-attach">👤 would hand this customer to a human</div>' : ''}
+                ${data.unknown ? `<div class="chat-attach">❓ Your documents don't cover this.
+                    <button class="btn btn-ghost btn-sm" data-teach-q="${escapeHtml(message)}" data-teach-a="">Teach the answer</button></div>` : ''}
             </div>` + $('testOutput').innerHTML;
         $('testMsg').value = '';
     } catch (err) { toast(err.message, false); }
     finally { $('testBtn').disabled = false; $('testLoader').style.display = 'none'; }
 });
 $('testMsg').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('testBtn').click(); });
+
+function showTab(name) {
+    document.querySelector(`.tab[data-panel="${name}"]`).click();
+}
+
+// "Teach the answer" buttons (manual test, automatic test) open the teach form, filled in.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-teach-q]');
+    if (!btn) return;
+    $('teachQ').value = btn.dataset.teachQ;
+    $('teachA').value = btn.dataset.teachA || '';
+    showTab('learn');
+    $('teachA').focus();
+});
+
+// ---------- automatic test ----------
+let selfTestTimer = null;
+
+function scoreClass(score) { return score >= 85 ? 'good' : score >= 60 ? 'ok' : 'bad'; }
+
+function renderResult(r) {
+    const teach = !r.passed && r.kind === 'faq'
+        ? `<button class="btn btn-ghost btn-sm" style="margin-top:0.5rem" data-teach-q="${escapeHtml(r.question)}" data-teach-a="${escapeHtml(r.expected)}"><i class="fa-solid fa-chalkboard-user"></i> Teach the right answer</button>` : '';
+    const flags = [r.handoff ? '👤 handed to a person' : '', r.unknown ? '❓ said it doesn\'t know' : '',
+        ...(r.attachments || []).map((f) => `📎 ${f}`)].filter(Boolean).join(' · ');
+    return `<div class="result ${r.passed ? '' : 'fail'}">
+        <div class="src">${r.passed ? '✅' : '❌'} ${escapeHtml(r.source)} · ${r.seconds}s</div>
+        <div class="q">${escapeHtml(r.question)}</div>
+        ${r.problems && r.problems.length ? `<div class="problems">${r.problems.map(escapeHtml).join('<br>')}</div>` : ''}
+        <details><summary>Reply and expected answer</summary>
+            <div class="pair"><b>Bot:</b> ${escapeHtml(r.reply)}${flags ? `\n<span class="muted">${escapeHtml(flags)}</span>` : ''}</div>
+            <div class="pair muted"><b>Expected:</b> ${escapeHtml(r.expected)}${r.reason ? `\n<b>Checker:</b> ${escapeHtml(r.reason)}` : ''}</div>
+        </details>
+        ${r.note ? `<div class="muted" style="font-size:0.82rem;margin-top:0.35rem">ℹ️ ${escapeHtml(r.note)}</div>` : ''}
+        ${teach}
+    </div>`;
+}
+
+// Keeps checking while a test runs; a failed check (server busy) is retried rather than giving up.
+function pollSelfTest() {
+    loadSelfTest().catch(() => { selfTestTimer = setTimeout(pollSelfTest, 5000); });
+}
+
+async function loadSelfTest() {
+    clearTimeout(selfTestTimer);
+    const forTenant = tenantId;
+    const data = await api(`/api/tenants/${forTenant}/self-test`);
+    if (forTenant !== tenantId) return;             // switched business while loading
+    const run = data.run;
+    const out = $('selfTestOut');
+    $('selfTestBtn').disabled = !!(run && run.status === 'running');
+
+    if (!run) {
+        out.innerHTML = '<div class="muted">This bot has not been tested yet.</div>';
+        return;
+    }
+    if (run.status === 'running') {
+        const pct = run.total ? Math.round(100 * run.progress / run.total) : 3;
+        out.innerHTML = `<div class="train-status"><span class="spinner"></span>${escapeHtml(run.stage || 'Running')}
+            ${run.total ? ` · ${run.progress} of ${run.total} questions` : ''}</div>
+            <div class="progress"><div style="width:${pct}%"></div></div>`;
+        selfTestTimer = setTimeout(pollSelfTest, 3000);
+        return;
+    }
+    if (run.status === 'failed') {
+        out.innerHTML = `<div class="train-status failed"><i class="fa-solid fa-circle-exclamation"></i> The test could not finish: ${escapeHtml(run.stage)}</div>`;
+        return;
+    }
+    const change = data.previous_score == null ? ''
+        : run.score === data.previous_score ? ' · same as last time'
+        : ` · ${run.score > data.previous_score ? '▲' : '▼'} ${Math.abs(run.score - data.previous_score)} since last time`;
+    const results = (run.results || []).slice().sort((a, b) => a.passed - b.passed);
+    out.innerHTML = `
+        <div class="stat-row" style="align-items:center">
+            <div class="stat"><span class="score ${scoreClass(run.score)}">${run.score}%</span>
+                <span>${run.passed} of ${run.total} passed${change}</span></div>
+            <div class="muted" style="font-size:0.84rem;max-width:520px">${run.score >= 85
+                ? 'Ready for customers. Fix any failed answers below first if you can.'
+                : 'Not ready yet. Each failed answer below says what went wrong. Usually the fix is to teach the right answer or correct the document.'}
+                <br>Tested ${new Date(run.finished_at || run.created_at).toLocaleString()}</div>
+        </div>
+        ${results.map(renderResult).join('')}`;
+}
+
+$('selfTestBtn').addEventListener('click', async () => {
+    $('selfTestBtn').disabled = true;
+    try {
+        await api(`/api/tenants/${tenantId}/self-test`, { method: 'POST' });
+        toast('Test started. It usually takes 1-2 minutes.');
+        await loadSelfTest();
+    } catch (err) { toast(err.message, false); $('selfTestBtn').disabled = false; }
+});
+
+// ---------- questions to answer ----------
+async function loadGaps() {
+    const forTenant = tenantId;
+    const data = await api(`/api/tenants/${forTenant}/gaps`);
+    if (forTenant !== tenantId) return;
+    const pill = $('gapCount');
+    pill.textContent = data.open.length;
+    pill.style.display = data.open.length ? 'inline' : 'none';
+
+    $('gapList').innerHTML = data.open.length ? data.open.map((g) => `
+        <div class="gap" data-gap="${g.id}">
+            <div class="asked">Asked ${g.times_asked} time${g.times_asked === 1 ? '' : 's'}${g.language ? ' · ' + escapeHtml(g.language) : ''}</div>
+            <input class="form-control" data-field="question" value="${escapeHtml(g.question)}" style="margin-top:0.4rem;font-weight:600">
+            ${g.bot_reply ? `<div class="said"><b>Bot said:</b> ${escapeHtml(g.bot_reply)}</div>` : '<div style="height:0.7rem"></div>'}
+            <textarea class="form-control" data-field="answer" style="min-height:70px" placeholder="Type the answer the bot should give…"></textarea>
+            <div style="display:flex;gap:0.4rem;margin-top:0.6rem;flex-wrap:wrap">
+                <button class="btn btn-primary btn-sm" data-gap-action="answer"><i class="fa-solid fa-check"></i> Save answer</button>
+                <button class="btn btn-ghost btn-sm" data-gap-action="dismiss">Ignore</button>
+            </div>
+        </div>`).join('')
+        : '<div class="empty">Nothing waiting. When customers ask something your documents don\'t cover, it will show up here.</div>';
+
+    $('taughtList').innerHTML = data.answered.length ? data.answered.map((g) => `
+        <div class="gap" data-gap="${g.id}">
+            <div class="q" style="font-weight:600">${escapeHtml(g.question)}</div>
+            <div class="said" style="color:var(--text-main)">${escapeHtml(g.answer)}</div>
+            <button class="btn btn-danger btn-sm" data-gap-action="dismiss"><i class="fa-solid fa-trash"></i> Remove</button>
+        </div>`).join('')
+        : '<div class="empty">Nothing taught yet.</div>';
+}
+
+document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-gap-action]');
+    if (!btn) return;
+    const box = btn.closest('[data-gap]');
+    const id = box.dataset.gap;
+    btn.disabled = true;
+    try {
+        if (btn.dataset.gapAction === 'answer') {
+            const answer = box.querySelector('[data-field="answer"]').value.trim();
+            if (!answer) { toast('Type the answer first.', false); return; }
+            await api(`/api/tenants/${tenantId}/gaps/${id}/answer`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ answer, question: box.querySelector('[data-field="question"]').value })
+            });
+            toast('Saved. The bot will use this answer from now on.');
+        } else {
+            await api(`/api/tenants/${tenantId}/gaps/${id}/dismiss`, { method: 'POST' });
+            toast('Removed.');
+        }
+        await loadGaps();
+    } catch (err) { toast(err.message, false); }
+    finally { btn.disabled = false; }
+});
+
+$('teachBtn').addEventListener('click', async () => {
+    const question = $('teachQ').value.trim(), answer = $('teachA').value.trim();
+    if (!question || !answer) return toast('Type both the question and the answer.', false);
+    $('teachBtn').disabled = true;
+    try {
+        await api(`/api/tenants/${tenantId}/teach`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question, answer })
+        });
+        $('teachQ').value = ''; $('teachA').value = '';
+        toast('Saved. The bot will use this answer from now on.');
+        await loadGaps();
+    } catch (err) { toast(err.message, false); }
+    finally { $('teachBtn').disabled = false; }
+});
+
+// ---------- new business ----------
+async function loadIndustryChoices() {
+    const choices = await api('/api/industries');
+    $('nb_industry').innerHTML = '<option value="">✨ Work it out from the documents</option>' +
+        choices.map((c) => `<option value="${c.key}">${escapeHtml(c.label)}</option>`).join('');
+}
+
+// ---------- setup checklist: documents → business type → automatic test ----------
+let setupTimer = null;
+let understandingWasRunning = false;
+let lastRunKey = null;
+
+const FIELD_NAMES = { industry: 'industry', bot_name: "bot's name", bot_role_title: 'job title', business_location: 'location',
+    currency: 'currency', handoff_rules: 'hand-over rules', quick_menu: 'quick-pick menu', system_prompt: 'instructions' };
+
+function step(n, state, title, body) {
+    const icon = state === 'done' ? '<i class="fa-solid fa-check"></i>' : state === 'busy' ? '<span class="spinner" style="margin:0"></span>' : n;
+    return `<div class="step"><div class="step-num ${state}">${icon}</div>
+        <div class="step-body"><b class="title">${title}</b>${body}</div></div>`;
+}
+
+async function loadSetup() {
+    clearTimeout(setupTimer);
+    const forTenant = tenantId;
+    const [docs, u, test] = await Promise.all([
+        api(`/api/tenants/${forTenant}/documents`),
+        api(`/api/tenants/${forTenant}/understanding`),
+        api(`/api/tenants/${forTenant}/self-test`),
+    ]);
+    if (forTenant !== tenantId) return;
+
+    const documents = docs.documents || [];
+    const training = documents.filter((d) => TRAINING.has(d.status)).length;
+    const ready = documents.filter((d) => d.status === 'ready').length;
+    const playbooks = documents.filter((d) => d.status === 'ready' && d.doc_type === 'playbook').length;
+    const s1 = !documents.length
+        ? step(1, '', 'Add documents', '<span class="muted">Upload a price list, menu or brochure below. Example chats teach the bot how to talk.</span>')
+        : step(1, training ? 'busy' : 'done', 'Documents',
+            `${ready} trained${playbooks ? ` (${playbooks} conversation playbook${playbooks === 1 ? '' : 's'})` : ''}${training ? ` · ${training} training now` : ''}`);
+
+    let s2;
+    if (u.status === 'running') {
+        s2 = step(2, 'busy', 'Understanding your business', '<span class="muted">Reading your documents to work out what kind of business this is…</span>');
+    } else if (u.status === 'failed') {
+        s2 = step(2, '', 'Understanding your business', `<span class="warn-text">${escapeHtml(u.error || 'Could not finish.')}</span>
+            <div style="margin-top:0.4rem"><button class="btn btn-ghost btn-sm" id="recheckBtn">Try again</button></div>`);
+    } else if (u.status === 'done') {
+        const who = u.industry_source === 'owner' ? 'chosen by you' : 'worked out from your documents';
+        const conf = u.industry_source === 'owner' ? '' :
+            ` · <span class="conf-${u.confidence}">${u.confidence} confidence</span>`;
+        const evidence = (u.evidence || []).length && u.industry_source !== 'owner'
+            ? `<div class="evidence">${u.evidence.map((e) => `<span class="chip">“${escapeHtml(e)}”</span>`).join('')}</div>` : '';
+        const filled = (u.filled || []).filter((f) => f !== 'industry').map((f) => FIELD_NAMES[f] || f);
+        const suggestion = u.suggestion ? `<div class="suggest">Your documents look more like <b>${escapeHtml(u.suggestion_label)}</b>.
+            <button class="btn btn-ghost btn-sm" data-switch-industry="${escapeHtml(u.suggestion)}" style="margin-left:0.4rem">Switch to it</button></div>` : '';
+        const low = u.confidence === 'low' && u.industry_source !== 'owner'
+            ? '<div class="suggest">Not sure about this one. Please check the industry in <b>Bot profile</b>.</div>' : '';
+        s2 = step(2, 'done', `Business type: ${escapeHtml(u.industry_label || 'Other')}`,
+            `<span class="muted">${who}</span>${conf}${evidence}
+            ${filled.length ? `<div style="margin-top:0.35rem">Filled in for you: ${filled.map(escapeHtml).join(', ')}. <a href="#" data-goto="profile" style="color:var(--primary)">Review</a></div>` : ''}
+            ${suggestion}${low}
+            <div style="margin-top:0.45rem"><button class="btn btn-ghost btn-sm" id="recheckBtn"><i class="fa-solid fa-rotate"></i> Re-check</button></div>`);
+    } else {
+        s2 = step(2, '', 'Business type', ready
+            ? `<span class="muted">Not worked out yet.</span> <button class="btn btn-ghost btn-sm" id="recheckBtn" style="margin-left:0.3rem">Work it out now</button>`
+            : '<span class="muted">Worked out automatically once a document is trained.</span>');
+    }
+
+    const run = test.run;
+    let s3;
+    if (run && run.status === 'running') {
+        s3 = step(3, 'busy', 'Automatic test', `<span class="muted">${run.progress} of ${run.total || '…'} questions</span>`);
+    } else if (run && run.status === 'done') {
+        s3 = step(3, 'done', `Automatic test: <span class="score ${scoreClass(run.score)}" style="font-size:1rem">${run.score}%</span>`,
+            `${run.passed} of ${run.total} passed · <a href="#" data-goto="test" style="color:var(--primary)">See results</a>`);
+    } else {
+        s3 = step(3, '', 'Automatic test', `<span class="muted">${run && run.status === 'failed' ? escapeHtml(run.stage) : 'Runs by itself after training.'}</span>`);
+    }
+    $('setupSteps').innerHTML = s1 + s2 + s3;
+
+    // A test that started by itself (after training) shows up in the Test tab too.
+    const runKey = run ? `${run.id}:${run.status}` : '';
+    if (runKey !== lastRunKey) { lastRunKey = runKey; loadSelfTest().catch(() => {}); }
+
+    // Profile fields may just have been filled in: show them.
+    if (understandingWasRunning && u.status !== 'running') loadProfile().catch(() => {});
+    understandingWasRunning = u.status === 'running';
+
+    if (training || u.status === 'running' || (run && run.status === 'running')) {
+        setupTimer = setTimeout(pollSetup, 4000);
+    }
+}
+
+function pollSetup() {
+    loadSetup().catch(() => { setupTimer = setTimeout(pollSetup, 6000); });
+}
+
+document.addEventListener('click', async (e) => {
+    const go = e.target.closest('[data-goto]');
+    if (go) { e.preventDefault(); showTab(go.dataset.goto); return; }
+
+    if (e.target.closest('#recheckBtn')) {
+        try {
+            await api(`/api/tenants/${tenantId}/understand`, { method: 'POST' });
+            toast('Reading your documents again…');
+            setTimeout(() => loadSetup().catch(() => {}), 800);
+        } catch (err) { toast(err.message, false); }
+        return;
+    }
+    const sw = e.target.closest('[data-switch-industry]');
+    if (sw) {
+        try {
+            await api(`/api/tenants/${tenantId}/bot-profile`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ industry: sw.dataset.switchIndustry })
+            });
+            toast('Industry changed.');
+            await Promise.all([loadProfile(), loadSetup()]);
+        } catch (err) { toast(err.message, false); }
+    }
+});
+
+$('newBizToggle').addEventListener('click', () => {
+    const card = $('newBizCard');
+    card.style.display = card.style.display === 'none' ? 'block' : 'none';
+    if (card.style.display === 'block') $('nb_name').focus();
+});
+$('newBizCancel').addEventListener('click', () => { $('newBizCard').style.display = 'none'; });
+
+$('newBizBtn').addEventListener('click', async () => {
+    const name = $('nb_name').value.trim();
+    if (!name) return toast('Type the business name.', false);
+    const phoneId = $('nb_phone_id').value.trim();
+    const token = $('nb_token').value.trim();
+    if (!!phoneId !== !!token) return toast('Fill in both WhatsApp fields, or leave both empty to start in test mode.', false);
+    $('newBizBtn').disabled = true;
+    try {
+        const created = await api('/api/tenants', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                business_name: name,
+                industry: $('nb_industry').value || null,     // empty = work it out from the documents
+                // Test mode: a unique placeholder ID, and a token the sender recognises as "don't send".
+                whatsapp_phone_number_id: phoneId || `test-${Date.now()}`,
+                meta_access_token: token || 'EAA_placeholder_token',
+                system_prompt: `You are the WhatsApp assistant for ${name}. Answer customers warmly and only from the knowledge base.`,
+                knowledge_base: 'No business documentation has been uploaded yet.',
+                human_handoff_number: $('nb_manager').value.trim() || null,
+                front_office_number: $('nb_hotline').value.trim() || null,
+            })
+        });
+        await api(`/api/tenants/${created.id}/bot-profile`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ business_location: $('nb_location').value.trim(), currency: $('nb_currency').value.trim() })
+        });
+        // Documents added on the form start training straight away; understanding and the test follow by themselves.
+        const files = [...$('nb_files').files];
+        let uploaded = 0;
+        for (const file of files) {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('doc_type', 'both');
+            try {
+                await api(`/api/tenants/${created.id}/documents`, { method: 'POST', body: form });
+                uploaded++;
+            } catch (err) { toast(`${file.name}: ${err.message}`, false); }
+        }
+        ['nb_name', 'nb_location', 'nb_manager', 'nb_hotline', 'nb_phone_id', 'nb_token', 'nb_files'].forEach((id) => { $(id).value = ''; });
+        $('newBizCard').style.display = 'none';
+        await loadTenants(created.id);
+        await refresh();
+        showTab('docs');
+        toast(uploaded
+            ? `${name} created. Training ${uploaded} document(s); the rest happens by itself.`
+            : `${name} created. Next: upload its documents.`);
+    } catch (err) { toast(err.message, false); }
+    finally { $('newBizBtn').disabled = false; }
+});
 
 // ---------- boot ----------
 async function loadTenants(keepId) {
@@ -776,14 +1240,16 @@ $('tenantSelect').addEventListener('change', async (e) => {
 
 async function refresh() {
     if (!tenantId) return;
-    await Promise.all([loadDocuments(), loadProfile(), loadProviders()]);
+    $('testOutput').innerHTML = '';
+    await Promise.all([loadDocuments(), loadProfile(), loadProviders(), loadSelfTest(), loadGaps(), loadSetup()]);
 }
 
 async function boot() {
     try {
-        const tenants = await loadTenants();
+        const [tenants] = await Promise.all([loadTenants(), loadIndustryChoices()]);
         if (!tenants.length) {
-            $('docList').innerHTML = '<div class="empty">No business is set up yet. Create one in the Admin dashboard first.</div>';
+            $('docList').innerHTML = '<div class="empty">No business is set up yet. Press <b>New business</b> above to add the first one.</div>';
+            $('newBizCard').style.display = 'block';
             return;
         }
         await refresh();

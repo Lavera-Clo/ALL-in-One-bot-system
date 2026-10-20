@@ -3,7 +3,9 @@ Auto Bot Profile Generator
 Reads a tenant's knowledge base and automatically generates a complete bot persona,
 system prompt, greeting style, handoff rules, and quick menu.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
+
 import llm_router as llm
 from industry_brain import INDUSTRY_CHOICES, detect_industry, get_pack, normalise_industry
 
@@ -21,6 +23,10 @@ class BotProfile:
     quick_menu: str  # "Title | Description" per line
     greeting_style: str
     currency: str
+    ai_industry: str = ""             # the model's own industry answer ('' if it gave none we recognise)
+    industry_confidence: str = "low"  # the model's own view: high | medium | low
+    industry_evidence: List[str] = field(default_factory=list)   # phrases from the documents
+    business_location: str = ""
 
 
 def _as_lines(value) -> str:
@@ -46,6 +52,9 @@ Return ONLY valid JSON matching this exact schema:
 {{
   "business_name": "detected or inferred business name",
   "industry": "exactly one key from the INDUSTRIES list below",
+  "industry_confidence": "high | medium | low - how clearly the documents show this industry",
+  "industry_evidence": ["3-6 short phrases copied from the documents that show what the business does"],
+  "business_location": "town/city and country if the documents state it, otherwise empty",
   "bot_name": "A friendly human name for the bot persona (e.g., 'Maya', 'Alex', 'Sara')",
   "bot_role_title": "Role title (e.g., 'Virtual Concierge', 'Customer Care Agent', 'Front Desk Assistant')",
   "system_prompt": "A comprehensive, tailored system prompt (200-400 words) for this business's WhatsApp bot. Include tone, boundaries, and what the bot should/shouldn't do.",
@@ -72,13 +81,11 @@ Pick the one that best describes what this business sells. Use "generic" only if
     # The model's answer is only trusted if it names a real industry; otherwise the business's
     # own words decide, and an unclear case stays generic.
     business_name = str(data.get("business_name") or business_name_hint or "Unknown Business")
-    industry = (
-        normalise_industry(data.get("industry"))
-        or normalise_industry(data.get("business_type"))
-        or detect_industry(knowledge_base_text[:15000], business_name)
-        or "generic"
-    )
+    ai_industry = normalise_industry(data.get("industry")) or normalise_industry(data.get("business_type"))
+    industry = ai_industry or detect_industry(knowledge_base_text[:15000], business_name) or "generic"
     pack = get_pack(industry)
+    confidence = str(data.get("industry_confidence") or "").strip().lower()
+    evidence = data.get("industry_evidence") if isinstance(data.get("industry_evidence"), list) else []
 
     return BotProfile(
         business_name=business_name,
@@ -92,4 +99,8 @@ Pick the one that best describes what this business sells. Use "generic" only if
         quick_menu=_as_lines(data.get("quick_menu")),
         greeting_style=str(data.get("greeting_style") or "Welcome! I'm your virtual assistant. How can I help you today?"),
         currency=str(data.get("currency") or "").strip(),
+        ai_industry=ai_industry,
+        industry_confidence=confidence if confidence in ("high", "medium", "low") else "low",
+        industry_evidence=[str(e).strip()[:80] for e in evidence if str(e).strip()][:6],
+        business_location=str(data.get("business_location") or "").strip()[:255],
     )

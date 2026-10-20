@@ -253,5 +253,16 @@ class TenantDocumentUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class GapAnswerRequest(BaseModel):
+    """The owner's answer to a question the bot couldn't answer. `question` lets them tidy its wording."""
+    answer: str = Field(..., example="Yes, there is free parking for about 80 cars next to the hall.")
+    question: Optional[str] = None
+
+
+class TeachRequest(BaseModel):
+    question: str = Field(..., example="Do you have parking?")
+    answer: str = Field(..., example="Yes, free parking for about 80 cars next to the hall.")
+
+
 class BotPreviewRequest(BaseModel):
     message: str = Field(..., example="wedding package eke ganan kohomada?")

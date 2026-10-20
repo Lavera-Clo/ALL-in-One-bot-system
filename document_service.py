@@ -28,9 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import llm_router
 from config import settings
 from database import AsyncSessionLocal
-from models import Tenant, TenantDocument
+from models import KnowledgeGap, Tenant, TenantDocument
+from order_service import get_dynamic_kb
+from playbook_pipeline import looks_like_playbook, train_playbook
 from training_pipeline import clean_keywords, train_document
-from training_service import compose_knowledge_base
+from training_service import compose_knowledge_base, typed_knowledge
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -39,7 +41,7 @@ UPLOAD_ROOT = os.path.join(PROJECT_ROOT, "uploads")
 PUBLIC_ROOT = os.path.join(PROJECT_ROOT, "static", "tenant_docs")
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 NOTES_MARKER = "### Additional notes\n"
-DOC_TYPES = ("knowledge", "sendable", "both")
+DOC_TYPES = ("knowledge", "sendable", "both", "playbook")
 
 
 def _safe_filename(filename: str) -> str:
@@ -113,8 +115,17 @@ async def rebuild_knowledge_base(db: AsyncSession, tenant: Tenant) -> str:
     from wiping another.
     """
     documents = await get_tenant_documents(db, tenant.id)
+    answered = (await db.execute(
+        select(KnowledgeGap.question, KnowledgeGap.answer)
+        .where(KnowledgeGap.tenant_id == tenant.id, KnowledgeGap.status == "answered")
+        .order_by(KnowledgeGap.answered_at.asc(), KnowledgeGap.id.asc())
+    )).all()
     previous = tenant.knowledge_base
-    tenant.knowledge_base = compose_knowledge_base(documents)
+    # A business with no fact documents may have its knowledge typed in directly; keep that.
+    # (A playbook alone doesn't count: it holds no facts.)
+    has_fact_documents = any(d.doc_type != "playbook" for d in documents)
+    typed = "" if has_fact_documents else typed_knowledge(previous)
+    tenant.knowledge_base = compose_knowledge_base(documents, owner_answers=answered, typed_text=typed)
     await db.commit()
     if tenant.knowledge_base != previous:
         # Cached answers were built from the old knowledge (old prices) — forget them.
@@ -145,7 +156,7 @@ async def create_document(
     Raises ValueError with a message suitable for showing the client.
     """
     if doc_type not in DOC_TYPES:
-        raise ValueError("doc_type must be 'knowledge', 'sendable' or 'both'.")
+        raise ValueError("doc_type must be 'knowledge', 'sendable', 'both' or 'playbook'.")
 
     quick_text = ""
     stored_path = public_path = file_url = None
@@ -162,8 +173,6 @@ async def create_document(
                     "This PDF is a scanned image with no text. Reading it needs an AI vision "
                     "provider — add GEMINI_API_KEY to .env, or paste the details as text.")
             stored_path, _ = _write(UPLOAD_ROOT, tenant.id, filename, content)
-            if doc_type in ("sendable", "both"):
-                public_path, file_url = _publish(tenant.id, filename, content)
         else:
             try:
                 quick_text = content.decode("utf-8")
@@ -177,6 +186,14 @@ async def create_document(
     if source != "pdf" and not quick_text.strip():
         raise ValueError("No documentation provided.")
 
+    # Example chats are a playbook, whatever the owner picked: trained as facts, a sample reply's
+    # price would be quoted to customers (see playbook_pipeline.py).
+    recognised_playbook = doc_type in ("knowledge", "both") and looks_like_playbook(quick_text)
+    if recognised_playbook:
+        doc_type = "playbook"
+    if source == "pdf" and doc_type in ("sendable", "both"):
+        public_path, file_url = _publish(tenant.id, filename, content)
+
     document = TenantDocument(
         tenant_id=tenant.id,
         title=(title or _default_title(filename))[:255],
@@ -185,7 +202,7 @@ async def create_document(
         stored_path=stored_path,
         public_path=public_path,
         file_url=file_url,
-        doc_type=doc_type if file_url else "knowledge",   # nothing to send without a file
+        doc_type=doc_type if (file_url or doc_type == "playbook") else "knowledge",   # nothing to send without a file
         raw_text=quick_text,
         summary="",
         trigger_keywords="",
@@ -193,7 +210,7 @@ async def create_document(
         char_count=len(quick_text),
         is_active=True,
         status="queued",
-        training_stage="Waiting to start",
+        training_stage="Recognised as a conversation playbook - waiting to start" if recognised_playbook else "Waiting to start",
         training_progress=0,
     )
     db.add(document)
@@ -237,15 +254,28 @@ async def run_training(document_id: int) -> None:
                 pdf_bytes = fh.read()
         plain_text = _split_notes(document.raw_text) if pdf_bytes else (document.raw_text or "")
 
+        is_playbook = document.doc_type == "playbook"
         try:
-            result = await train_document(
-                business_name=tenant.business_name,
-                filename=document.original_filename or document.title,
-                pdf_bytes=pdf_bytes,
-                plain_text=plain_text,
-                title_hint=document.title,
-                progress=progress,
-            )
+            if is_playbook:
+                result = await train_playbook(
+                    business_name=tenant.business_name,
+                    filename=document.original_filename or document.title,
+                    pdf_bytes=pdf_bytes,
+                    plain_text=plain_text,
+                    title_hint=document.title,
+                    # Compared against everything the bot quotes from: documents AND live product prices.
+                    knowledge_base=await get_dynamic_kb(tenant, db),
+                    progress=progress,
+                )
+            else:
+                result = await train_document(
+                    business_name=tenant.business_name,
+                    filename=document.original_filename or document.title,
+                    pdf_bytes=pdf_bytes,
+                    plain_text=plain_text,
+                    title_hint=document.title,
+                    progress=progress,
+                )
         except Exception as exc:  # noqa: BLE001 — surface any failure to the portal
             logger.exception(f"Training failed for document {document_id}")
             document.status = "failed"
@@ -263,9 +293,9 @@ async def run_training(document_id: int) -> None:
         # Never overwrite what the owner typed: only fill title/keywords/caption if still default.
         if document.title == _default_title(document.original_filename):
             document.title = result.title[:255]
-        if not (document.trigger_keywords or "").strip():
+        if not is_playbook and not (document.trigger_keywords or "").strip():
             document.trigger_keywords = ", ".join(result.keywords)
-        if not (document.caption or "").strip():
+        if not is_playbook and not (document.caption or "").strip():
             document.caption = result.caption
 
         document.status = "ready"
@@ -275,6 +305,12 @@ async def run_training(document_id: int) -> None:
         await rebuild_knowledge_base(db, tenant)
         logger.info(f"Tenant {tenant.id}: trained '{document.title}' in "
                     f"{result.report.get('duration_seconds')}s ({result.report.get('facts')} facts).")
+        tenant_id = tenant.id
+
+    # New knowledge: work out what kind of business this is (again), then re-test the bot.
+    # Imported here because understanding_service builds on this module.
+    from understanding_service import after_document_trained
+    await after_document_trained(tenant_id, playbook=is_playbook)
 
 
 async def add_document(db: AsyncSession, tenant: Tenant, **kwargs) -> TenantDocument:
@@ -325,7 +361,10 @@ async def update_document(db: AsyncSession, document: TenantDocument, tenant: Te
             continue
         if key == "doc_type":
             if value not in DOC_TYPES:
-                raise ValueError("doc_type must be 'knowledge', 'sendable' or 'both'.")
+                raise ValueError("doc_type must be 'knowledge', 'sendable', 'both' or 'playbook'.")
+            if (value == "playbook") != (document.doc_type == "playbook"):
+                raise ValueError("A playbook and a facts document are trained differently - upload the file "
+                                 "again and choose the other kind.")
             if value in ("sendable", "both") and not document.file_url:
                 has_pdf = document.stored_path and document.stored_path.lower().endswith(".pdf") \
                     and os.path.exists(document.stored_path)

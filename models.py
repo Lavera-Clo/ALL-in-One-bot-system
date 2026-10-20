@@ -29,6 +29,12 @@ class Tenant(Base):
     # ('hospitality', 'restaurant', 'clinic', ...). It picks the bot's persona, default handoff
     # rules, greeting buttons and safety limits. Every other field here can still override it.
     industry: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Who chose the industry: 'owner' (never changed automatically) or 'auto' / empty (the
+    # system may refine it as documents are added — see understanding_service.py).
+    industry_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # JSON: what the system worked out about this business from its documents, how sure it is,
+    # the evidence, and which profile fields it filled in. Shown on the portal's setup card.
+    understanding: Mapped[str | None] = mapped_column(Text, nullable=True)
     persona_template: Mapped[str | None] = mapped_column(String(50), nullable=True)  # optional override; empty = the industry's persona
     handoff_rules: Mapped[str | None] = mapped_column(Text, nullable=True)  # one rule per line, injected into the prompt
     # WhatsApp quick-pick list, one item per line as "Title | Description".
@@ -44,6 +50,8 @@ class Tenant(Base):
     products: Mapped[list["Product"]] = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
     orders: Mapped[list["Order"]] = relationship("Order", back_populates="tenant", cascade="all, delete-orphan")
     documents: Mapped[list["TenantDocument"]] = relationship("TenantDocument", back_populates="tenant", cascade="all, delete-orphan")
+    knowledge_gaps: Mapped[list["KnowledgeGap"]] = relationship("KnowledgeGap", cascade="all, delete-orphan")
+    test_runs: Mapped[list["BotTestRun"]] = relationship("BotTestRun", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Tenant(id={self.id}, business_name='{self.business_name}', phone_id='{self.whatsapp_phone_number_id}')>"
@@ -71,6 +79,8 @@ class TenantDocument(Base):
 
     # 'knowledge' = bot reads it only. 'sendable' = bot sends the file only.
     # 'both'      = bot answers from it AND can send the original PDF.
+    # 'playbook'  = how the owner wants conversations to go (goals, style, objections, example
+    #               chats). Never part of the knowledge base: its numbers are not facts.
     doc_type: Mapped[str] = mapped_column(String(20), default="both", nullable=False)
 
     raw_text: Mapped[str] = mapped_column(Text, default="", nullable=False)   # kept so the KB can be regenerated later
@@ -137,6 +147,56 @@ class BotQACache(Base):
 
     def __repr__(self) -> str:
         return f"<BotQACache(id={self.id}, tenant_id={self.tenant_id}, question='{self.question[:20]}')>"
+
+
+class KnowledgeGap(Base):
+    """
+    A question customers asked that the bot could not answer from the knowledge base.
+
+    This is how the bot learns from real chats WITHOUT learning anything wrong: the gap is
+    shown to the owner, the owner types the right answer once, and that answer joins the
+    knowledge base (see document_service.rebuild_knowledge_base). Nothing the bot said itself
+    is ever reused as a fact. Similar questions are counted on one row, so the owner sees
+    what customers ask most.
+    """
+    __tablename__ = "knowledge_gaps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    bot_reply: Mapped[str | None] = mapped_column(Text, nullable=True)      # what the bot said instead
+    language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    times_asked: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_customer: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="chat", nullable=False)   # 'chat' | 'test' | 'owner'
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False, index=True)  # open | answered | dismissed
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)         # the owner's answer, once given
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<KnowledgeGap(id={self.id}, tenant_id={self.tenant_id}, status='{self.status}', asked={self.times_asked})>"
+
+
+class BotTestRun(Base):
+    """One automatic test of a tenant's bot (self_test_service.py): questions, replies and checks."""
+    __tablename__ = "bot_test_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)   # running | done | failed
+    stage: Mapped[str | None] = mapped_column(Text, nullable=True)        # human-readable progress / error
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)   # questions finished
+    total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)    # 0-100, once done
+    results: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON list, one entry per question
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<BotTestRun(id={self.id}, tenant_id={self.tenant_id}, status='{self.status}', score={self.score})>"
 
 
 class Product(Base):
