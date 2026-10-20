@@ -173,7 +173,7 @@
     </div>
 
     <nav class="navbar">
-        <div class="brand"><i class="fa-solid fa-boxes-stacked"></i><span>Order & Product Dashboard</span></div>
+        <a href="/" class="brand" style="color:inherit;text-decoration:none"><i class="fa-solid fa-boxes-stacked"></i><span>Order & Product Dashboard</span></a>
         <div class="nav-links" style="align-items:center;">
             <a href="/admin">Admin</a>
             <a href="/orders" class="active">Orders</a>
@@ -358,8 +358,28 @@
     <div id="toast" class="toast"><i class="fa-solid fa-circle-check" style="color:var(--accent)"></i><span id="toastMsg"></span></div>
 
     <script>
-        const TENANT_ID = 1;
-        const API_BASE = `/api/tenants/${TENANT_ID}`;
+        // Which business this page shows: a business owner's account always shows their own;
+        // platform staff can pick one with ?tenant=<id> (the Train Bot page links here that way).
+        let TENANT_ID = null;
+        let API_BASE = '';
+
+        async function resolveBusiness() {
+            const me = await (await authFetch('/api/admin/me')).json();
+            const requested = Number(new URLSearchParams(location.search).get('tenant')) || null;
+            if (me.tenant_id) {
+                TENANT_ID = me.tenant_id;
+            } else if (requested) {
+                TENANT_ID = requested;
+            } else {
+                const list = await (await authFetch('/api/tenants')).json();
+                TENANT_ID = list.length ? list[0].id : null;
+            }
+            API_BASE = `/api/tenants/${TENANT_ID}`;
+            // The Admin page is the platform's own; business owners don't get it.
+            document.querySelectorAll('a[href="/admin"]').forEach((a) => { a.style.display = me.tenant_id ? 'none' : ''; });
+            document.querySelectorAll('a[href="/train"]').forEach((a) => { a.href = me.tenant_id ? '/train' : `/train?tenant=${TENANT_ID}`; });
+            return me;
+        }
 
         // ===== AUTH =====
         function getToken() { return sessionStorage.getItem('adminToken'); }
@@ -405,7 +425,9 @@
             }
         }
 
-        function afterLogin() {
+        async function afterLogin() {
+            try { await resolveBusiness(); } catch (err) { return; }   // a 401 already brought the login back
+            if (!TENANT_ID) { showToast('No business found for this account.'); return; }
             document.getElementById('loggedInAs').textContent =
                 `${sessionStorage.getItem('adminUsername')} (${sessionStorage.getItem('adminRole')})`;
             loadOrders();
@@ -534,7 +556,7 @@
                         <td style="font-size:0.8rem">${new Date(o.created_at).toLocaleString()}</td>
                         <td style="white-space:nowrap">
                             ${actionButtons(o)}
-                            <a href="/api/orders/${o.id}/invoice" target="_blank" class="btn btn-secondary btn-sm" title="Download Invoice"><i class="fa-solid fa-file-invoice"></i></a>
+                            <button class="btn btn-secondary btn-sm" title="Download Invoice" onclick="downloadInvoice(${o.id}, '${o.order_number}')"><i class="fa-solid fa-file-invoice"></i></button>
                         </td>
                     </tr>
                 `).join('');
@@ -684,6 +706,16 @@
                 showToast('Product deleted');
                 loadProducts();
             } catch (err) { showToast('Error deleting product ❌'); }
+        }
+
+        // Invoices need the signed-in session (they hold customer details), so they are fetched
+        // and saved like the CSV exports rather than opened as a plain link.
+        async function downloadInvoice(orderId, orderNumber) {
+            try {
+                const res = await authFetch(`/api/orders/${orderId}/invoice`);
+                if (!res.ok) throw new Error();
+                downloadBlob(await res.blob(), `invoice_${orderNumber}.pdf`);
+            } catch (err) { showToast('Could not download the invoice ❌'); }
         }
 
         async function loadBankDetails() {

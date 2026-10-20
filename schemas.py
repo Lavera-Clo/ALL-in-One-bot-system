@@ -214,6 +214,8 @@ class AdminUserResponse(BaseModel):
     username: str
     role: str
     is_active: bool
+    tenant_id: Optional[int] = None      # set for a business owner's ('client') account
+    full_name: Optional[str] = None
     created_at: datetime
     last_login_at: Optional[datetime] = None
 
@@ -251,6 +253,19 @@ class TenantDocumentUpdate(BaseModel):
     summary: Optional[str] = None
     doc_type: Optional[str] = Field(None, example="both")
     is_active: Optional[bool] = None
+
+
+class SignupRequest(BaseModel):
+    """A business owner creating their own account and business from the portal."""
+    full_name: Optional[str] = Field(None, example="Nimal Perera")
+    email: str = Field(..., example="nimal@citycare.lk")
+    password: str = Field(..., example="a-long-password")
+    business_name: str = Field(..., example="City Care Medical Centre")
+
+
+class WhatsAppConnectRequest(BaseModel):
+    phone_number_id: str = Field(..., example="109876543210987")
+    access_token: str = Field(..., example="EAA...")
 
 
 class GapAnswerRequest(BaseModel):

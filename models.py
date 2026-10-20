@@ -293,13 +293,21 @@ class OrderItem(Base):
 
 
 class AdminUser(Base):
-    """A staff/owner account that can log into the admin dashboards."""
+    """
+    An account that can sign in to the portal.
+
+    'owner' / 'staff' run the PLATFORM and can see every business. 'client' is a business
+    owner who signed up themselves: tenant_id is their business, and every page and API call
+    is limited to it (see main.ensure_tenant_access).
+    """
     __tablename__ = "admin_users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    username: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)  # an email for clients
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="staff", nullable=False)  # 'owner' | 'staff'
+    role: Mapped[str] = mapped_column(String(20), default="staff", nullable=False)  # 'owner' | 'staff' | 'client'
+    tenant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

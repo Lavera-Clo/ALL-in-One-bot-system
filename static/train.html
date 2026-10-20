@@ -104,6 +104,14 @@
         .step-body b.title { display: block; margin-bottom: 0.15rem; }
         .conf-high { color: #6ee7b7; } .conf-medium { color: #fcd34d; } .conf-low { color: #fca5a5; }
         .evidence { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.35rem; }
+        .biz-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+        .biz-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 0.5rem; border-bottom: 1px solid var(--card-border); }
+        .biz-table td { padding: 0.55rem 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.05); vertical-align: top; }
+        .biz-table tr[data-open] { cursor: pointer; }
+        .biz-table tr[data-open]:hover td { background: rgba(139,92,246,0.08); }
+        .wa-box { margin-top: 0.5rem; padding: 0.8rem; border-radius: 0.6rem; background: rgba(15,23,42,0.5); border: 1px solid var(--card-border); }
+        .wa-box code { background: rgba(0,0,0,0.35); padding: 0.1rem 0.4rem; border-radius: 0.3rem; font-size: 0.82rem; word-break: break-all; }
+        .wa-box ol { margin: 0.4rem 0 0.7rem 1.2rem; line-height: 1.7; }
         .suggest { margin-top: 0.5rem; padding: 0.6rem 0.8rem; border-radius: 0.5rem; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); }
 
         .kb-preview { background: rgba(0,0,0,0.35); border-radius: 0.5rem; padding: 1.1rem; font-family: ui-monospace, monospace;
@@ -167,7 +175,7 @@
 </head>
 <body>
 <nav class="navbar">
-    <div class="brand"><i class="fa-solid fa-brain"></i><span>Bot Training Portal</span></div>
+    <a href="/" class="brand" style="color:inherit;text-decoration:none"><i class="fa-solid fa-brain"></i><span>Bot Training Portal</span></a>
     <div class="nav-links">
         <a href="/admin">Admin</a>
         <a href="/orders">Orders</a>
@@ -180,12 +188,26 @@
 
 <!-- LOGIN -->
 <div class="container login-wrap" id="loginView" style="display:none">
-    <div class="card">
+    <div class="card" id="signinCard">
         <h2><i class="fa-solid fa-lock"></i> Sign in</h2>
-        <p class="hint">Training changes what your bot tells customers, so it needs an admin login.</p>
-        <div class="field"><label>Username</label><input class="form-control" id="loginUser" autocomplete="username"></div>
+        <p class="hint">Sign in to train your WhatsApp bot.</p>
+        <div class="field"><label>Email or username</label><input class="form-control" id="loginUser" autocomplete="username"></div>
         <div class="field"><label>Password</label><input class="form-control" id="loginPass" type="password" autocomplete="current-password"></div>
         <button class="btn btn-primary btn-full" id="loginBtn">Sign in</button>
+        <p class="muted" id="toSignup" style="display:none;text-align:center;margin-top:1rem;font-size:0.9rem">
+            New here? <a href="#" id="showSignup" style="color:var(--primary);font-weight:600">Create your business bot</a></p>
+    </div>
+
+    <div class="card" id="signupCard" style="display:none">
+        <h2><i class="fa-solid fa-rocket"></i> Create your business bot</h2>
+        <p class="hint">Upload your price list or menu and your bot trains itself, works out your type of business and tests itself. You connect your own WhatsApp number when you're ready; until then nothing is sent to customers.</p>
+        <div class="field"><label>Your name</label><input class="form-control" id="suName" autocomplete="name"></div>
+        <div class="field"><label>Business name *</label><input class="form-control" id="suBusiness" autocomplete="organization" placeholder="e.g. City Care Medical Centre"></div>
+        <div class="field"><label>Email *</label><input class="form-control" id="suEmail" type="email" autocomplete="email"></div>
+        <div class="field"><label>Password * (at least 8 characters)</label><input class="form-control" id="suPass" type="password" autocomplete="new-password"></div>
+        <button class="btn btn-primary btn-full" id="signupBtn">Create account</button>
+        <p class="muted" style="text-align:center;margin-top:1rem;font-size:0.9rem">
+            Already have an account? <a href="#" id="showSignin" style="color:var(--primary);font-weight:600">Sign in</a></p>
     </div>
 </div>
 
@@ -238,6 +260,7 @@
         <div class="tab" data-panel="kb"><i class="fa-solid fa-book"></i> Knowledge base</div>
         <div class="tab" data-panel="test"><i class="fa-regular fa-comments"></i> Test the bot</div>
         <div class="tab" data-panel="learn"><i class="fa-solid fa-graduation-cap"></i> Questions to answer <span class="count-pill" id="gapCount" style="display:none"></span></div>
+        <div class="tab" data-panel="platform" id="platformTab" style="display:none"><i class="fa-solid fa-building"></i> All businesses</div>
     </div>
 
     <!-- DOCUMENTS -->
@@ -371,6 +394,15 @@
         </div>
     </div>
 
+    <!-- PLATFORM (platform staff only) -->
+    <div class="panel" id="panel-platform">
+        <div class="card">
+            <h2><i class="fa-solid fa-building"></i> Every business on the platform</h2>
+            <p class="hint">Who signed up, how far their setup has got, and whether their bot is live. Click a business to open it.</p>
+            <div style="overflow-x:auto"><table class="biz-table" id="bizTable"></table></div>
+        </div>
+    </div>
+
     <!-- LEARNING -->
     <div class="panel" id="panel-learn">
         <div class="card">
@@ -460,6 +492,45 @@ $('loginBtn').addEventListener('click', async () => {
     } catch (err) { toast(err.message, false); }
 });
 $('loginPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+
+function showSignupCard(show) {
+    $('signupCard').style.display = show ? 'block' : 'none';
+    $('signinCard').style.display = show ? 'none' : 'block';
+    (show ? $('suName') : $('loginUser')).focus();
+}
+$('showSignup').addEventListener('click', (e) => { e.preventDefault(); showSignupCard(true); });
+$('showSignin').addEventListener('click', (e) => { e.preventDefault(); showSignupCard(false); });
+
+$('signupBtn').addEventListener('click', async () => {
+    const payload = {
+        full_name: $('suName').value.trim() || null,
+        business_name: $('suBusiness').value.trim(),
+        email: $('suEmail').value.trim(),
+        password: $('suPass').value,
+    };
+    if (!payload.business_name || !payload.email || !payload.password) return toast('Fill in your business name, email and password.', false);
+    $('signupBtn').disabled = true;
+    try {
+        const res = await fetch('/api/signup', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Could not create the account');
+        sessionStorage.setItem(TOKEN_KEY, data.token);
+        sessionStorage.setItem('adminUsername', data.username || '');
+        sessionStorage.setItem('adminRole', data.role || '');
+        $('suPass').value = '';
+        showPortal();
+        await boot();
+        toast('Welcome! Start by uploading your price list, menu or brochure.');
+    } catch (err) { toast(err.message, false); }
+    finally { $('signupBtn').disabled = false; }
+});
+$('suPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('signupBtn').click(); });
+
+// Show "Create your business bot" only while the platform accepts sign-ups.
+fetch('/api/auth/options').then((r) => r.json()).then((o) => { if (o.signup_open) $('toSignup').style.display = 'block'; }).catch(() => {});
+if (new URLSearchParams(location.search).get('signup') === '1') showSignupCard(true);
 
 $('logoutLink').addEventListener('click', (e) => {
     e.preventDefault();
@@ -1067,10 +1138,11 @@ function step(n, state, title, body) {
 async function loadSetup() {
     clearTimeout(setupTimer);
     const forTenant = tenantId;
-    const [docs, u, test] = await Promise.all([
+    const [docs, u, test, wa] = await Promise.all([
         api(`/api/tenants/${forTenant}/documents`),
         api(`/api/tenants/${forTenant}/understanding`),
         api(`/api/tenants/${forTenant}/self-test`),
+        api(`/api/tenants/${forTenant}/whatsapp`),
     ]);
     if (forTenant !== tenantId) return;
 
@@ -1121,7 +1193,7 @@ async function loadSetup() {
     } else {
         s3 = step(3, '', 'Automatic test', `<span class="muted">${run && run.status === 'failed' ? escapeHtml(run.stage) : 'Runs by itself after training.'}</span>`);
     }
-    $('setupSteps').innerHTML = s1 + s2 + s3;
+    $('setupSteps').innerHTML = s1 + s2 + s3 + whatsappStep(wa);
 
     // A test that started by itself (after training) shows up in the Test tab too.
     const runKey = run ? `${run.id}:${run.status}` : '';
@@ -1135,6 +1207,87 @@ async function loadSetup() {
         setupTimer = setTimeout(pollSetup, 4000);
     }
 }
+
+function whatsappStep(wa) {
+    if (wa.connected) {
+        return step(4, 'done', 'Live on WhatsApp',
+            `<span class="muted">Phone Number ID ${escapeHtml(wa.phone_number_id)}. Customers who message your number get answers from this bot.</span>
+            <div style="margin-top:0.4rem"><a href="#" id="waChange" style="color:var(--primary);font-size:0.85rem">Change number</a></div>
+            <div id="waForm" style="display:none">${whatsappForm(wa)}</div>`);
+    }
+    return step(4, '', 'Connect your WhatsApp number',
+        `<span class="muted">Your bot is in test mode: try it in <a href="#" data-goto="test" style="color:var(--primary)">Test the bot</a>. Connect when you're ready to go live.</span>
+        <div style="margin-top:0.45rem"><button class="btn btn-ghost btn-sm" id="waOpen"><i class="fa-brands fa-whatsapp"></i> Connect WhatsApp</button></div>
+        <div id="waForm" style="display:none">${whatsappForm(wa)}</div>`);
+}
+
+function whatsappForm(wa) {
+    return `<div class="wa-box">
+        <ol>
+            <li>At <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener" style="color:var(--primary)">Meta for Developers</a>, create an app of type <b>Business</b> and add <b>WhatsApp</b>.</li>
+            <li>Under <b>WhatsApp → Configuration → Webhook</b>, set the callback URL to <code>${escapeHtml(wa.webhook_url)}</code>,
+                the verify token to <code>${escapeHtml(wa.verify_token)}</code>, and subscribe to <b>messages</b>.</li>
+            <li>Under <b>WhatsApp → API Setup</b>, copy the <b>Phone number ID</b>, and a <b>permanent access token</b>
+                (Business Settings → System users), and paste them below.</li>
+        </ol>
+        <div class="grid2" style="margin-bottom:0.6rem">
+            <div><label>Phone Number ID</label><input class="form-control" id="waPhoneId" placeholder="e.g. 109876543210987"></div>
+            <div><label>Access token</label><input class="form-control" id="waToken" type="password" autocomplete="off" placeholder="EAA..."></div>
+        </div>
+        <button class="btn btn-primary btn-sm" id="waConnect"><i class="fa-solid fa-plug"></i> Check with Meta and connect</button>
+    </div>`;
+}
+
+document.addEventListener('click', async (e) => {
+    if (e.target.closest('#waOpen') || e.target.closest('#waChange')) {
+        e.preventDefault();
+        clearTimeout(setupTimer);             // keep the form open while it's being filled in
+        $('waForm').style.display = 'block';
+        $('waPhoneId').focus();
+        return;
+    }
+    if (!e.target.closest('#waConnect')) return;
+    const btn = e.target.closest('#waConnect');
+    const phone_number_id = $('waPhoneId').value.trim(), access_token = $('waToken').value.trim();
+    if (!phone_number_id || !access_token) return toast('Paste both the Phone Number ID and the access token.', false);
+    btn.disabled = true;
+    try {
+        const data = await api(`/api/tenants/${tenantId}/whatsapp`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone_number_id, access_token })
+        });
+        toast(data.message);
+        await loadSetup();
+    } catch (err) { toast(err.message, false); btn.disabled = false; }
+});
+
+// ---------- platform: every business ----------
+async function loadPlatform() {
+    const data = await api('/api/platform/businesses');
+    const rows = data.businesses;
+    $('bizTable').innerHTML = `<tr><th>Business</th><th>Owner</th><th>Type</th><th>Docs</th><th>Test</th><th>WhatsApp</th><th>Messages (7 days)</th><th>Open questions</th><th>Joined</th></tr>` +
+        (rows.length ? rows.map((b) => `<tr data-open="${b.id}">
+            <td><b>${escapeHtml(b.business_name)}</b></td>
+            <td>${b.owners.length ? b.owners.map(escapeHtml).join('<br>') : '<span class="muted">platform</span>'}</td>
+            <td>${escapeHtml(b.industry || '—')}</td>
+            <td>${b.documents}</td>
+            <td>${b.test_score == null ? '<span class="muted">—</span>' : `<span class="score ${scoreClass(b.test_score)}" style="font-size:0.95rem">${b.test_score}%</span>`}</td>
+            <td>${b.whatsapp_connected ? '<span class="conf-high">● live</span>' : '<span class="muted">test mode</span>'}</td>
+            <td>${b.customer_messages_7d}</td>
+            <td>${b.open_questions || '<span class="muted">0</span>'}</td>
+            <td class="muted">${b.created_at ? new Date(b.created_at).toLocaleDateString() : '—'}</td>
+        </tr>`).join('') : '<tr><td colspan="9" class="muted">No businesses yet.</td></tr>');
+}
+
+$('bizTable').addEventListener('click', async (e) => {
+    const row = e.target.closest('[data-open]');
+    if (!row) return;
+    tenantId = Number(row.dataset.open);
+    $('tenantSelect').value = tenantId;
+    updateOrdersLink();
+    showTab('docs');
+    await refresh();
+});
 
 function pollSetup() {
     loadSetup().catch(() => { setupTimer = setTimeout(pollSetup, 6000); });
@@ -1228,28 +1381,55 @@ async function loadTenants(keepId) {
     const select = $('tenantSelect');
     select.innerHTML = tenants
         .map((t) => `<option value="${t.id}">${escapeHtml(t.business_name)}</option>`).join('');
-    tenantId = keepId || (tenants[0] && tenants[0].id);
+    tenantId = (keepId && tenants.some((t) => t.id === keepId)) ? keepId : (tenants[0] && tenants[0].id);
     if (tenantId) select.value = tenantId;
+    updateOrdersLink();
     return tenants;
 }
 
 $('tenantSelect').addEventListener('change', async (e) => {
     tenantId = Number(e.target.value);
+    updateOrdersLink();
     await refresh();
 });
 
 async function refresh() {
     if (!tenantId) return;
     $('testOutput').innerHTML = '';
-    await Promise.all([loadDocuments(), loadProfile(), loadProviders(), loadSelfTest(), loadGaps(), loadSetup()]);
+    await Promise.all([loadDocuments(), loadProfile(), loadProviders(), loadSelfTest(), loadGaps(), loadSetup(),
+        isOwnerAccount() ? Promise.resolve() : loadPlatform()]);
+}
+
+// The signed-in account: a business owner ('client', tenant_id set) or the platform's own staff.
+let me = null;
+const isOwnerAccount = () => !!(me && me.tenant_id);
+
+function applyAccountView() {
+    const owner = isOwnerAccount();
+    // A business owner works on their one business: no switcher, no "New business", no platform pages.
+    $('newBizToggle').style.display = owner ? 'none' : '';
+    $('tenantSelect').disabled = owner;
+    $('platformTab').style.display = owner ? 'none' : '';
+    document.querySelectorAll('.nav-links a[href="/admin"]').forEach((a) => { a.style.display = owner ? 'none' : ''; });
+    const h = document.querySelector('.header h1');
+    if (h) h.textContent = owner ? 'Your WhatsApp bot' : 'Train your WhatsApp bot';
+}
+
+function updateOrdersLink() {
+    document.querySelectorAll('.nav-links a[href^="/orders"]').forEach((a) => {
+        a.href = isOwnerAccount() || !tenantId ? '/orders' : `/orders?tenant=${tenantId}`;
+    });
 }
 
 async function boot() {
     try {
-        const [tenants] = await Promise.all([loadTenants(), loadIndustryChoices()]);
+        me = await api('/api/admin/me');
+        applyAccountView();
+        const requested = Number(new URLSearchParams(location.search).get('tenant')) || undefined;
+        const [tenants] = await Promise.all([loadTenants(requested), loadIndustryChoices()]);
         if (!tenants.length) {
             $('docList').innerHTML = '<div class="empty">No business is set up yet. Press <b>New business</b> above to add the first one.</div>';
-            $('newBizCard').style.display = 'block';
+            if (!isOwnerAccount()) $('newBizCard').style.display = 'block';
             return;
         }
         await refresh();

@@ -66,6 +66,8 @@ _COLUMN_MIGRATIONS = [
     ("tenants", "quick_buttons", "TEXT"),
     ("tenants", "industry_source", "VARCHAR(20)"),
     ("tenants", "understanding", "TEXT"),
+    ("admin_users", "tenant_id", "INTEGER REFERENCES tenants(id) ON DELETE CASCADE"),
+    ("admin_users", "full_name", "VARCHAR(150)"),
 ]
 
 

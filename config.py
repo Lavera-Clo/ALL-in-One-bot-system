@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
 
+    # The platform's name, shown on the home page. Change it to your brand.
+    PLATFORM_NAME: str = os.getenv("PLATFORM_NAME", "WhatsApp AI Bot")
+
+    # Self-service sign-up: anyone can create an account and their own business bot from the
+    # portal's login page. Set ALLOW_SIGNUP=false to close sign-ups (existing accounts still work).
+    ALLOW_SIGNUP: bool = os.getenv("ALLOW_SIGNUP", "true").strip().lower() not in ("0", "false", "no")
+
     # Public base URL this server is reachable at (used to build invoice links and
     # Stripe success/cancel redirect URLs). Defaults to localhost for local dev.
     BASE_URL: str = os.getenv("BASE_URL", "http://localhost:8000")

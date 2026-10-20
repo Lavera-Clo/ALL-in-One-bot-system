@@ -4,6 +4,34 @@ from config import settings
 
 logger = logging.getLogger("uvicorn.error")
 
+class WhatsAppCredentialsError(ValueError):
+    """Meta rejected a Phone Number ID / access token pair. The message is safe to show the owner."""
+
+
+async def verify_whatsapp_number(phone_number_id: str, meta_access_token: str) -> dict:
+    """
+    Ask Meta whether this access token can use this phone number, before a business switches its
+    bot over to it. Returns {"display_phone_number", "verified_name"}; raises
+    WhatsAppCredentialsError with Meta's own explanation when they don't work together.
+    """
+    url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{phone_number_id}"
+    params = {"fields": "display_phone_number,verified_name"}
+    headers = {"Authorization": f"Bearer {meta_access_token}"}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, params=params, headers=headers, timeout=15.0)
+        except httpx.HTTPError as e:
+            raise WhatsAppCredentialsError(f"Could not reach Meta to check the number ({e.__class__.__name__}). Try again.")
+    if response.status_code != 200:
+        try:
+            message = response.json().get("error", {}).get("message") or response.text
+        except ValueError:
+            message = response.text
+        raise WhatsAppCredentialsError(f"Meta did not accept these details: {message[:300]}")
+    data = response.json()
+    return {"display_phone_number": data.get("display_phone_number"), "verified_name": data.get("verified_name")}
+
+
 async def download_whatsapp_media(media_id: str, meta_access_token: str) -> bytes:
     """
     Downloads media (like voice notes) from WhatsApp Graph API given a media ID.
