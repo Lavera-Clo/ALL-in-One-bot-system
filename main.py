@@ -50,6 +50,10 @@ from schemas import (
     TeachRequest,
     SignupRequest,
     WhatsAppConnectRequest,
+    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings,
+    ChatBotUpdate,
+    BusinessBotUpdate,
+    ManualOrderCreate,
 )
 from learning_service import answer_gap, dismiss_gap, gap_payload, get_gap, list_gaps, record_gap, teach
 from self_test_service import recover_interrupted_runs, run_payload, run_self_test, start_run as start_test_run
@@ -60,7 +64,7 @@ from understanding_service import (
 from ai_service import (
     generate_ai_response, generate_bot_reply, detect_language_intent,
     get_pdfs_for_user_message, resolve_reply_documents, DOC_REQUEST_WORDS,
-    transcribe_audio, classify_product_from_image,
+    classify_product_from_image,
 )
 from whatsapp_client import (
     WhatsAppCredentialsError,
@@ -96,12 +100,30 @@ from order_service import (
     get_broadcast_recipients,
     get_abandoned_carts,
     mark_cart_reminded,
+    create_manual_order,
     get_dynamic_kb,
 )
 from auth_service import hash_password, verify_password, generate_session_token, session_expiry
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
 from invoice_service import generate_invoice_pdf
-from realtime import manager as ws_manager
+from realtime import manager as ws_manager, inbox_manager
+from inbox_service import (
+    bot_may_reply, chat_messages, describe_incoming, get_conversation, is_manager, list_chats, mark_needs_human,
+    on_whatsapp_sent, record_incoming, send_as_agent, set_business_bot, set_chat_bot, update_incoming_text,
+    MAX_REPLY_CHARS,
+)
+from whatsapp_client import add_send_listener
+from sync_service import (
+    HISTORY_DAYS_ALLOWED, apply_statuses, cleanup_old_messages, contact_payload, find_by_client_id,
+    list_contacts, message_stats, record_device_message, sync_changes, update_contact,
+)
+from voice_service import (
+    bot_text as voice_bot_text, fallback_reply as voice_fallback_reply, hear_voice_note,
+    inbox_text as voice_inbox_text,
+)
+
+# Every message sent to a customer is recorded for the live inbox (inbox_service.py).
+add_send_listener(on_whatsapp_sent)
 from rate_limit import RateLimitMiddleware
 from bot_profile_generator import generate_bot_profile
 from bot_learning import get_learning_stats
@@ -211,11 +233,30 @@ async def lifespan(app: FastAPI):
             logger.info(f"Bootstrapped first owner admin account: '{settings.ADMIN_USERNAME}'")
 
     abandoned_cart_task = asyncio.create_task(abandoned_cart_worker())
+    history_cleanup_task = asyncio.create_task(history_cleanup_worker())
 
     yield
 
     abandoned_cart_task.cancel()
+    history_cleanup_task.cancel()
     logger.info("Shutting down WhatsApp AI Chatbot service...")
+
+
+HISTORY_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+async def history_cleanup_worker():
+    """Every 6 hours: delete messages older than each business's history_days (contacts stay)."""
+    await asyncio.sleep(60)            # let startup finish first
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                await cleanup_old_messages(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("History cleanup failed")
+        await asyncio.sleep(HISTORY_CLEANUP_INTERVAL_SECONDS)
 
 
 async def abandoned_cart_worker():
@@ -319,6 +360,19 @@ app.add_middleware(RateLimitMiddleware, limits={
     "/api/signup": (5, 600),                  # each sign-up creates a business
     "/api/generate-business-ideas": (5, 300), # each run costs an OpenAI call
 })
+
+# Websites on other addresses (such as the Business Sender site) may call the API from a
+# browser only when listed in CORS_ORIGINS. Sign-in is a bearer token, never a cookie, so
+# credentials stay off.
+_cors_origins = [o.strip().rstrip("/") for o in settings.CORS_ORIGINS.split(",") if o.strip() and o.strip() != "*"]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +777,8 @@ async def get_bot_profile(
         "currency": tenant.currency or "",
         "industry": config.industry,
         "persona_template": config.persona_template,
+        "bot_enabled": tenant.bot_enabled,
+        "history_days": tenant.history_days,
         "human_handoff_number": tenant.human_handoff_number or "",
         "front_office_number": tenant.front_office_number or "",
         "handoff_rules": config.handoff_rules,
@@ -1009,6 +1065,208 @@ async def connect_whatsapp(
     await db.commit()
     logger.info(f"Tenant {tenant.id}: WhatsApp connected to {number.get('display_phone_number')} by {admin.username}.")
     return {"message": f"Connected to {number.get('display_phone_number') or 'your number'}.", **number, **_whatsapp_payload(tenant)}
+
+
+# ---------------------------------------------------------------------------
+# Live inbox — see every chat, reply by hand, switch the bot off chat by chat
+# (inbox_service.py). Used by the portal and by the Business Sender website.
+# ---------------------------------------------------------------------------
+
+def _chat_phone(phone: str) -> str:
+    """A customer's WhatsApp number as stored: digits only."""
+    cleaned = "".join(ch for ch in phone if ch.isdigit())
+    if not 7 <= len(cleaned) <= 16:
+        raise HTTPException(status_code=400, detail="That doesn't look like a WhatsApp number.")
+    return cleaned
+
+
+@app.get("/api/tenants/{tenant_id}/inbox/chats", tags=["Inbox"])
+async def inbox_chats(tenant_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Every conversation, newest first: last message, who sent it, and whether the bot may answer."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return {"bot_enabled": tenant.bot_enabled, "chats": await list_chats(db, tenant)}
+
+
+@app.get("/api/tenants/{tenant_id}/inbox/chats/{phone}/messages", tags=["Inbox"])
+async def inbox_messages(tenant_id: int, phone: str, limit: int = Query(300, ge=1, le=1000),
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """One customer's messages, oldest first (the most recent `limit`)."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    phone = _chat_phone(phone)
+    conv = await get_conversation(db, tenant_id, phone)
+    return {
+        "phone": phone,
+        "name": conv.display_name if conv else "",
+        "bot_enabled": conv.bot_enabled if conv else True,
+        "needs_human": bool(conv and conv.needs_human),
+        "messages": await chat_messages(db, tenant_id, phone, limit),
+    }
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/messages", tags=["Inbox"])
+async def inbox_send(tenant_id: int, phone: str, payload: InboxSendRequest,
+                     db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Send a reply typed by a person. WhatsApp's refusal (most often: the customer last wrote more
+    than 24 hours ago) comes back as ok=false with the reason; the message is kept as FAILED.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    phone = _chat_phone(phone)
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Type a message first.")
+    if len(text) > MAX_REPLY_CHARS:
+        raise HTTPException(status_code=400, detail=f"WhatsApp messages can be at most {MAX_REPLY_CHARS} characters.")
+    earlier = await find_by_client_id(db, tenant.id, payload.client_msg_id)
+    if earlier is not None:
+        # The same send repeated (the app lost the first answer): don't message the customer twice.
+        return {"message_id": earlier.id, "ok": earlier.status != "FAILED", "error": earlier.error}
+    result = await send_as_agent(tenant, phone, text, client_msg_id=payload.client_msg_id)
+    logger.info(f"Tenant {tenant.id}: {admin.username} replied to {phone} from the inbox (ok={result['ok']}).")
+    return result
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/messages/{message_id}/retry", tags=["Inbox"])
+async def inbox_retry(tenant_id: int, message_id: int, db: AsyncSession = Depends(get_db),
+                      admin: AdminUser = Depends(get_current_admin)):
+    """Try a failed text message again (it keeps its place in the chat)."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    row = await db.get(ChatHistory, message_id)
+    if row is None or row.tenant_id != tenant.id or row.role != "assistant":
+        raise HTTPException(status_code=404, detail="Message not found")
+    if row.status != "FAILED":
+        raise HTTPException(status_code=400, detail="Only a message that failed can be retried.")
+    if (row.message_type or "text") != "text":
+        raise HTTPException(status_code=400, detail="Only text messages can be retried from here.")
+    return await send_as_agent(tenant, row.customer_phone_number, row.content, retry_of=row.id)
+
+
+@app.patch("/api/tenants/{tenant_id}/inbox/chats/{phone}", tags=["Inbox"])
+async def inbox_set_chat_bot(tenant_id: int, phone: str, payload: ChatBotUpdate,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Bot on or off for this one customer. Off: their messages are saved and a person replies."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    conv = await set_chat_bot(db, tenant_id, _chat_phone(phone), payload.bot_enabled)
+    return {"phone": conv.customer_phone, "bot_enabled": conv.bot_enabled, "needs_human": conv.needs_human}
+
+
+@app.patch("/api/tenants/{tenant_id}/bot", tags=["Inbox"])
+async def inbox_set_business_bot(tenant_id: int, payload: BusinessBotUpdate,
+                                 db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """The master switch: off = no automatic replies to anyone (each chat's own switch is kept)."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    await set_business_bot(db, tenant, payload.enabled)
+    return {"bot_enabled": tenant.bot_enabled}
+
+
+# --- Shared database: sync, contacts, history -------------------------------------------
+# One database for the website, the Android app and the bot (sync_service.py).
+
+@app.get("/api/tenants/{tenant_id}/sync", tags=["Sync"])
+async def sync_api(tenant_id: int, since: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000),
+                   db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Messages and contacts changed after `since` (a stamp from the last answer's `cursor`).
+    Ask again at once while `hasMore`; once caught up, ask from `cursor - overlapUs` and skip
+    ids already held - saves finishing out of order are caught that way.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return await sync_changes(db, tenant, since, limit)
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/record", tags=["Sync"])
+async def record_device_message_api(tenant_id: int, phone: str, payload: DeviceMessageRecord,
+                                    db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Save a message a phone sent by itself (e.g. a photo). Repeating the upload is harmless."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    row = await record_device_message(db, tenant, _chat_phone(phone), payload.text.strip(), payload.type or "text",
+                                      payload.wa_message_id, payload.client_msg_id, payload.status,
+                                      payload.error, payload.sent_at)
+    return {"message_id": row.id, "status": row.status}
+
+
+@app.get("/api/tenants/{tenant_id}/contacts", tags=["Sync"])
+async def contacts_api(tenant_id: int, q: str = Query("", max_length=100), limit: int = Query(500, ge=1, le=2000),
+                       db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Every customer who has messaged the business, kept after old messages are cleaned up."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    return {"contacts": await list_contacts(db, tenant_id, q, limit)}
+
+
+@app.patch("/api/tenants/{tenant_id}/contacts/{phone}", tags=["Sync"])
+async def update_contact_api(tenant_id: int, phone: str, payload: ContactUpdate,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Give a customer a name (shown before their WhatsApp name) or notes. Every device sees it."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    conv = await update_contact(db, tenant_id, _chat_phone(phone), payload.saved_name, payload.notes)
+    return contact_payload(conv)
+
+
+@app.get("/api/tenants/{tenant_id}/inbox/settings", tags=["Sync"])
+async def history_settings_api(tenant_id: int, db: AsyncSession = Depends(get_db),
+                               admin: AdminUser = Depends(get_current_admin)):
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return {"history_days": tenant.history_days, "allowed": list(HISTORY_DAYS_ALLOWED)}
+
+
+@app.patch("/api/tenants/{tenant_id}/inbox/settings", tags=["Sync"])
+async def update_history_settings_api(tenant_id: int, payload: HistorySettings, db: AsyncSession = Depends(get_db),
+                                      admin: AdminUser = Depends(get_current_admin)):
+    """How many days of messages to keep (contacts and daily counts are always kept)."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    if payload.history_days not in HISTORY_DAYS_ALLOWED:
+        raise HTTPException(status_code=400, detail=f"Choose one of: {', '.join(map(str, HISTORY_DAYS_ALLOWED))} days.")
+    tenant.history_days = payload.history_days
+    await db.commit()
+    return {"history_days": tenant.history_days, "allowed": list(HISTORY_DAYS_ALLOWED)}
+
+
+@app.get("/api/tenants/{tenant_id}/message-stats", tags=["Sync"])
+async def message_stats_api(tenant_id: int, days: int = Query(30, ge=1, le=730), db: AsyncSession = Depends(get_db),
+                            admin: AdminUser = Depends(get_current_admin)):
+    """Messages in and out per day - also for days whose messages were already cleaned up."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    return {"days": await message_stats(db, tenant_id, days)}
+
+
+@app.post("/api/tenants/{tenant_id}/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, tags=["Orders"])
+async def create_manual_order_api(tenant_id: int, payload: ManualOrderCreate,
+                                  db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """An order entered by hand (a phone call, a walk-in). Stock is taken as for a WhatsApp checkout."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        order = await create_manual_order(db, tenant, payload.customer_phone, payload.customer_name,
+                                          [(line.product_id, line.quantity) for line in payload.items], payload.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return order
+
+
+@app.websocket("/ws/inbox/{tenant_id}")
+async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[str] = Query(None)):
+    """
+    Live updates for an open inbox: chat changes, the master switch, and order events. Opens its
+    own short database session to check the token, so no session stays open for the socket's life.
+    """
+    async with AsyncSessionLocal() as db:
+        admin = await get_admin_from_token(token, db) if token else None
+    if not admin:
+        await websocket.close(code=4401)
+        return
+    if not can_access(admin, tenant_id):
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+    inbox_manager.register(tenant_id, websocket)
+    ws_manager.register(tenant_id, websocket)       # order_created / order_updated too
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        inbox_manager.disconnect(tenant_id, websocket)
+        ws_manager.disconnect(tenant_id, websocket)
 
 
 # ---------------------------------------------------------------------------
@@ -1459,6 +1717,13 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
             metadata = value.get("metadata", {})
             phone_number_id = metadata.get("phone_number_id")
 
+            # Delivery / read receipts for messages sent to customers: the ticks every device shows.
+            if value.get("statuses") and phone_number_id:
+                status_tenant = (await db.execute(
+                    select(Tenant).where(Tenant.whatsapp_phone_number_id == phone_number_id))).scalar_one_or_none()
+                if status_tenant:
+                    await apply_statuses(db, status_tenant, value["statuses"])
+
             messages = value.get("messages", [])
             if not messages or not phone_number_id:
                 continue
@@ -1491,6 +1756,30 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                         continue
 
                     logger.info(f"Resolved tenant: ID={tenant.id}, Business='{tenant.business_name}'")
+
+                    # -----------------------------------------------------------
+                    # LIVE INBOX: every message is saved first, whatever happens next, so the
+                    # business sees the whole conversation. The bot then replies only if its
+                    # master switch and this chat's switch are both on (inbox_service.py);
+                    # otherwise a person answers from the inbox. The manager's own number is
+                    # always served, so order CONFIRM / REJECT keeps working while it's paused.
+                    # -----------------------------------------------------------
+                    contact = next((c for c in value.get("contacts") or [] if c.get("wa_id") == customer_phone), None)
+                    customer_name = ((contact or {}).get("profile") or {}).get("name")
+                    inbox_text, inbox_kind = describe_incoming(message)
+                    incoming_row = await record_incoming(db, tenant.id, customer_phone, inbox_text, inbox_kind,
+                                                         message.get("id"), customer_name)
+                    # Voice notes are understood before the bot switch is checked: a person
+                    # answering a paused chat needs to read what was said, not just "[Voice note]".
+                    voice = voice_style = None
+                    if msg_type == "audio":
+                        voice, voice_style = await hear_voice_note(db, tenant, customer_phone, message)
+                        await update_incoming_text(db, incoming_row, voice_inbox_text(voice))
+
+                    conversation = await get_conversation(db, tenant.id, customer_phone)
+                    if not bot_may_reply(tenant, conversation) and not is_manager(tenant, customer_phone):
+                        logger.info(f"Bot is off for {customer_phone} (tenant {tenant.id}); saved for a person to answer.")
+                        continue
 
                     if msg_type == "text":
                         user_text = message.get("text", {}).get("body", "").strip()
@@ -1562,28 +1851,18 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                     logger.error(f"Product selection error: {prod_err}")
                                 continue
                     elif msg_type == "audio":
-                        audio_id = message.get("audio", {}).get("id")
-                        if audio_id:
-                            logger.info(f"Audio message received (ID: {audio_id}). Downloading and transcribing...")
-                            audio_bytes = await download_whatsapp_media(audio_id, tenant.meta_access_token)
-                            if audio_bytes:
-                                api_key = settings.OPENAI_API_KEY.strip() if settings.OPENAI_API_KEY else ""
-                                transcribed_text = await transcribe_audio(audio_bytes, api_key)
-                                if transcribed_text:
-                                    logger.info(f"Successfully transcribed audio: '{transcribed_text}'")
-                                    user_text = transcribed_text
-                                else:
-                                    # Fallback if transcription fails or no API key
-                                    logger.warning("Transcription failed or no API key available.")
-                                    user_text = "I sent a voice note, but it couldn't be transcribed."
-                                    # We can send an immediate error message back
-                                    await send_whatsapp_message(
-                                        phone_number_id=tenant.whatsapp_phone_number_id,
-                                        recipient_phone=customer_phone,
-                                        message_text="I'm sorry, I couldn't listen to your voice note right now. Could you please type your message? 🙏",
-                                        meta_access_token=tenant.meta_access_token
-                                    )
-                                    continue
+                        # Heard above (voice_service.py: Whisper, then Gemini when unsure or not English).
+                        if voice.status == "ok":
+                            user_text = voice_bot_text(voice)
+                        else:
+                            # Silent, or nobody could listen: say so in the customer's own language.
+                            await send_whatsapp_message(
+                                phone_number_id=tenant.whatsapp_phone_number_id,
+                                recipient_phone=customer_phone,
+                                message_text=voice_fallback_reply(voice.status, voice_style),
+                                meta_access_token=tenant.meta_access_token
+                            )
+                            continue
                     elif msg_type == "image":
                         # -----------------------------------------------------------
                         # BANK RECEIPT IMAGE HANDLER
@@ -1949,14 +2228,17 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 logger.error(f"Failed to send product list: {list_err}")
                             continue
 
-                    # Fetch past chat history for context (up to 10 previous turns)
+                    # Fetch past chat history for context (up to 10 previous turns). The message
+                    # being answered was already saved for the inbox; it is left out here because
+                    # it is passed separately (counting it twice would make it look repeated).
                     history_stmt = (
                         select(ChatHistory)
                         .where(
                             ChatHistory.tenant_id == tenant.id,
-                            ChatHistory.customer_phone_number == customer_phone
+                            ChatHistory.customer_phone_number == customer_phone,
+                            ChatHistory.id != incoming_row.id,
                         )
-                        .order_by(ChatHistory.created_at.asc())
+                        .order_by(ChatHistory.created_at.asc(), ChatHistory.id.asc())
                     )
                     history_res = await db.execute(history_stmt)
                     history_records = history_res.scalars().all()
@@ -1987,22 +2269,8 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # the deterministic keyword resolver.
                     ai_reply, docs_to_send = resolve_reply_documents(ai_reply, user_text, bot_config)
 
-                    # Store user message & AI response in database
-                    user_history = ChatHistory(
-                        tenant_id=tenant.id,
-                        customer_phone_number=customer_phone,
-                        role="user",
-                        content=user_text
-                    )
-                    ai_history = ChatHistory(
-                        tenant_id=tenant.id,
-                        customer_phone_number=customer_phone,
-                        role="assistant",
-                        content=ai_reply
-                    )
-                    db.add(user_history)
-                    db.add(ai_history)
-                    await db.commit()
+                    # The customer's message was saved on arrival, and the reply is saved by the
+                    # inbox's send listener once WhatsApp accepts (or refuses) it.
 
                     # Learning from real chats: a question the documents don't cover goes on the
                     # owner's "Questions to answer" list. Once they answer it, every later customer
@@ -2163,7 +2431,10 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                             except Exception as menu_err:
                                 logger.error(f"Failed to send persistent main menu to {customer_phone}: {menu_err}")
 
-                    # Handle Human Handoff if requested
+                    # Handle Human Handoff if requested. The chat is flagged "Needs you" in the
+                    # inbox too, so it's found even when nobody saw the WhatsApp alert.
+                    if is_handoff_requested:
+                        await mark_needs_human(db, tenant.id, customer_phone)
                     if is_handoff_requested and tenant.human_handoff_number:
                         logger.info(f"Triggering human handoff notification to {tenant.human_handoff_number}")
                         await notify_human_agent(
@@ -2483,7 +2754,8 @@ async def get_tenant_analytics(tenant_id: int, db: AsyncSession = Depends(get_db
         )
         .group_by(func.date(Order.created_at))
     )).all()
-    revenue_by_day = {row[0]: row[1] for row in revenue_rows}
+    # SQLite returns the day as text, PostgreSQL as a date: key both as "YYYY-MM-DD".
+    revenue_by_day = {str(row[0])[:10]: float(row[1] or 0) for row in revenue_rows}
 
     revenue_trend = []
     for i in range(13, -1, -1):

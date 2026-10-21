@@ -1,8 +1,91 @@
+import functools
+import inspect
 import logging
 import httpx
 from config import settings
 
 logger = logging.getLogger("uvicorn.error")
+
+
+# ---------------------------------------------------------------------------
+# Send listeners. Every message the server sends to a customer — bot answers, order updates,
+# cart reminders, broadcasts, replies typed in the inbox — goes through the send functions
+# below, so this is the one place the live inbox (inbox_service.py) learns about them all.
+# A listener can never break a send: its errors are logged and swallowed.
+# ---------------------------------------------------------------------------
+
+_send_listeners = []
+
+
+def add_send_listener(listener) -> None:
+    """listener(phone_number_id, recipient, text, kind, ok, error, wa_message_id) — an async callable."""
+    if listener not in _send_listeners:
+        _send_listeners.append(listener)
+
+
+def _summary(kind: str, a: dict) -> str:
+    """The message as a person would read it in the inbox."""
+    if kind == "text":
+        return a.get("message_text") or ""
+    if kind == "image":
+        return f"[Image] {a.get('caption') or ''}".strip()
+    if kind == "document":
+        caption = a.get("caption") or ""
+        return f"[Document] {a.get('filename') or ''}" + (f"\n{caption}" if caption else "")
+    if kind == "buttons":
+        titles = " · ".join(f"[{b.get('title')}]" for b in (a.get("buttons") or [])[:3])
+        return f"{a.get('body_text') or ''}\n{titles}".strip()
+    if kind == "list":
+        rows = [r.get("title") for s in (a.get("sections") or []) for r in s.get("rows", [])]
+        return f"{a.get('body_text') or ''}\n[List: {', '.join(rows[:10])}]".strip()
+    return f"[{kind}]"
+
+
+def describe_send_error(exc: Exception) -> str:
+    """Meta's reason for a failed send, in words an owner understands."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            err = exc.response.json().get("error", {})
+        except ValueError:
+            err = {}
+        code = err.get("code")
+        if code in (131047, 131026) or "re-engagement" in str(err.get("message", "")).lower():
+            return ("Outside the 24-hour window. WhatsApp only allows an approved template message "
+                    "until this customer writes to you again.")
+        message = err.get("error_user_msg") or err.get("message") or exc.response.text
+        return f"WhatsApp refused the message: {str(message)[:300]}"
+    return f"Could not reach WhatsApp: {exc.__class__.__name__}"
+
+
+async def _notify(kind: str, a: dict, ok: bool, error: str = None, result=None) -> None:
+    wa_id = None
+    if isinstance(result, dict):
+        wa_id = ((result.get("messages") or [{}])[0] or {}).get("id")
+    for listener in list(_send_listeners):
+        try:
+            await listener(a.get("phone_number_id"), a.get("recipient_phone"), _summary(kind, a), kind, ok, error, wa_id)
+        except Exception:  # noqa: BLE001 — a listener must never break sending
+            logger.exception("WhatsApp send listener failed")
+
+
+def _reported(kind: str):
+    """Reports every call of the wrapped send function to the listeners, success or failure."""
+    def wrap(fn):
+        signature = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        async def send(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception as exc:
+                await _notify(kind, bound.arguments, ok=False, error=describe_send_error(exc))
+                raise
+            await _notify(kind, bound.arguments, ok=True, result=result)
+            return result
+        return send
+    return wrap
 
 class WhatsAppCredentialsError(ValueError):
     """Meta rejected a Phone Number ID / access token pair. The message is safe to show the owner."""
@@ -69,6 +152,7 @@ async def download_whatsapp_media(media_id: str, meta_access_token: str) -> byte
             logger.error(f"Error downloading media {media_id}: {e}")
             return b""
 
+@_reported("text")
 async def send_whatsapp_message(
     phone_number_id: str,
     recipient_phone: str,
@@ -122,6 +206,7 @@ async def send_whatsapp_message(
             raise e
 
 
+@_reported("image")
 async def send_whatsapp_image(
     phone_number_id: str,
     recipient_phone: str,
@@ -166,6 +251,7 @@ async def send_whatsapp_image(
             raise e
 
 
+@_reported("document")
 async def send_whatsapp_document(
     phone_number_id: str,
     recipient_phone: str,
@@ -236,6 +322,7 @@ async def notify_human_agent(
     )
 
 
+@_reported("buttons")
 async def send_whatsapp_button_message(
     phone_number_id: str,
     recipient_phone: str,
@@ -301,6 +388,7 @@ async def send_whatsapp_button_message(
             raise e
 
 
+@_reported("list")
 async def send_whatsapp_list_message(
     phone_number_id: str,
     recipient_phone: str,

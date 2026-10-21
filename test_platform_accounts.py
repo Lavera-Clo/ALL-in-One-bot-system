@@ -18,7 +18,8 @@ import sys
 import tempfile
 
 _TMP = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + os.path.join(_TMP.name, "platform_test.db").replace("\\", "/")
+# TEST_DATABASE_URL runs the same checks on PostgreSQL (run_tests_postgres.py).
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or "sqlite+aiosqlite:///" + os.path.join(_TMP.name, "platform_test.db").replace("\\", "/")
 
 import httpx  # noqa: E402
 

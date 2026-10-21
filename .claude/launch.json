@@ -6,6 +6,18 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
       "port": 8000
+    },
+    {
+      "name": "whatsapp-bot-scratch",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:/Users/avishka/AppData/Local/Temp/claude/C--Users-avishka-Music-Bussnes-work-ai-BOT-automat/d6714c1c-4d4d-469e-b837-03975f9a8ab9/scratchpad/run_scratch.py"],
+      "port": 8765
+    },
+    {
+      "name": "business-sender-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../vercel-webhook", "run", "dev", "--", "-p", "3000"],
+      "port": 3000
     }
   ]
 }

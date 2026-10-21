@@ -10,3 +10,6 @@ python-dotenv>=1.0.1
 fpdf2>=2.7.9
 python-multipart>=0.0.18
 stripe>=10.0.0
+av>=12.0.0          # decodes WhatsApp voice notes to check they contain speech (voice_service.py)
+numpy>=1.26
+asyncpg>=0.29         # PostgreSQL driver: the shared database (e.g. Supabase) in production

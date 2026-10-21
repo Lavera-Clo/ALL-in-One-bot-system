@@ -19,7 +19,8 @@ from types import SimpleNamespace
 # Must be set before any project module is imported: config.py reads it at import time.
 _TMP = tempfile.TemporaryDirectory()
 _DB_PATH = os.path.join(_TMP.name, "industry_test.db")
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + _DB_PATH.replace("\\", "/")
+# TEST_DATABASE_URL runs the same checks on PostgreSQL (run_tests_postgres.py).
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or "sqlite+aiosqlite:///" + _DB_PATH.replace("\\", "/")
 
 import httpx  # noqa: E402
 
@@ -262,6 +263,26 @@ def stored_industries():
 
 async def test_migration():
     print("\nDatabase migration")
+    if os.environ.get("TEST_DATABASE_URL"):
+        # This check builds an old-style SQLite file by hand; PostgreSQL databases start new.
+        # This check builds an old SQLite file by hand. On PostgreSQL: the same businesses,
+        # put through the same one-time industry backfill.
+        from database import _backfill_tenant_industry
+        await init_db()
+        async with AsyncSessionLocal() as db:
+            for name, phone_id, role, prompt, persona in LEGACY_TENANTS:
+                db.add(Tenant(business_name=name, whatsapp_phone_number_id=phone_id,
+                              meta_access_token="EAA_placeholder_token", system_prompt=prompt,
+                              knowledge_base="Open 9 AM to 5 PM.", bot_role_title=role, persona_template=persona))
+            await db.commit()
+        async with engine.begin() as conn:
+            await _backfill_tenant_industry(conn)
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            industries = dict((await db.execute(select(Tenant.whatsapp_phone_number_id, Tenant.industry))).all())
+        check(industries == {"1001": "hospitality", "1002": "retail", "1003": "generic", "1004": "clinic"},
+              "the industry backfill gives the same answers on PostgreSQL")
+        return
     make_legacy_database()
     await init_db()
     industries = stored_industries()

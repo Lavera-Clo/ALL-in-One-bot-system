@@ -268,6 +268,59 @@ class WhatsAppConnectRequest(BaseModel):
     access_token: str = Field(..., example="EAA...")
 
 
+# --- Live inbox ---------------------------------------------------------------
+
+class InboxSendRequest(BaseModel):
+    """A reply typed by a person in the inbox."""
+    text: str = Field(..., example="Hi Nimal, yes - we can deliver on Saturday.")
+    # The sending device's own id for this message. Sending again with the same id (after a
+    # dropped connection) returns the first result instead of messaging the customer twice.
+    client_msg_id: Optional[str] = Field(None, max_length=64, example="a1b2c3d4-...")
+
+
+class DeviceMessageRecord(BaseModel):
+    """A message a phone sent by itself (with its own WhatsApp token), saved so every device sees it."""
+    text: str = Field("", max_length=8000)
+    type: str = Field("text", max_length=20, example="image")
+    client_msg_id: str = Field(..., min_length=1, max_length=64)
+    wa_message_id: Optional[str] = Field(None, max_length=128)
+    status: str = Field("SENT", example="SENT")
+    error: Optional[str] = Field(None, max_length=2000)
+    sent_at: Optional[int] = Field(None, description="epoch milliseconds on the device")
+
+
+class ContactUpdate(BaseModel):
+    saved_name: Optional[str] = Field(None, max_length=150, example="Nimal (wholesale)")
+    notes: Optional[str] = Field(None, max_length=5000)
+
+
+class HistorySettings(BaseModel):
+    history_days: int = Field(21, example=21)
+
+
+class ChatBotUpdate(BaseModel):
+    """Switch the bot on or off for one customer's chat."""
+    bot_enabled: bool
+
+
+class BusinessBotUpdate(BaseModel):
+    """The master switch: off = no automatic replies to anyone."""
+    enabled: bool
+
+
+class ManualOrderLine(BaseModel):
+    product_id: int
+    quantity: int = Field(1, ge=1, le=10000)
+
+
+class ManualOrderCreate(BaseModel):
+    """An order entered by hand (a phone call, a walk-in), not through the WhatsApp cart."""
+    customer_phone: Optional[str] = Field(None, example="94771234567")
+    customer_name: Optional[str] = None
+    items: List[ManualOrderLine]
+    status: str = Field("pending_payment", example="pending_payment")
+
+
 class GapAnswerRequest(BaseModel):
     """The owner's answer to a question the bot couldn't answer. `question` lets them tidy its wording."""
     answer: str = Field(..., example="Yes, there is free parking for about 80 cars next to the hall.")

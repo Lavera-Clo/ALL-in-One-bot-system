@@ -14,6 +14,10 @@ class ConnectionManager:
 
     async def connect(self, tenant_id: int, websocket: WebSocket) -> None:
         await websocket.accept()
+        self.register(tenant_id, websocket)
+
+    def register(self, tenant_id: int, websocket: WebSocket) -> None:
+        """Add a socket that is already accepted (one socket can listen to several managers)."""
         self.active.setdefault(tenant_id, []).append(websocket)
 
     def disconnect(self, tenant_id: int, websocket: WebSocket) -> None:
@@ -35,4 +39,5 @@ class ConnectionManager:
             self.disconnect(tenant_id, ws)
 
 
-manager = ConnectionManager()
+manager = ConnectionManager()          # order events, for the Orders dashboard
+inbox_manager = ConnectionManager()    # chat events, for the live inbox (inbox_service.py)

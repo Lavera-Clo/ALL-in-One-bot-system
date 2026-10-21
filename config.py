@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
 
+    # Other websites allowed to call this server from a browser, comma separated, e.g. the
+    # Business Sender site: "https://business-sender.vercel.app,http://localhost:3000".
+    # Empty = only this server's own pages. Never "*": the API carries business data.
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
+
     # The platform's name, shown on the home page. Change it to your brand.
     PLATFORM_NAME: str = os.getenv("PLATFORM_NAME", "WhatsApp AI Bot")
 
