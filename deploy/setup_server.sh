@@ -21,7 +21,7 @@ if [[ -z "$DOMAIN" ]]; then echo "Give your domain: sudo bash setup.sh bot.yourd
 
 echo "==> Packages"
 apt-get update -y
-apt-get install -y python3 python3-venv python3-pip git curl debian-keyring debian-archive-keyring apt-transport-https
+apt-get install -y python3 python3-venv python3-pip python3-dev build-essential git curl debian-keyring debian-archive-keyring apt-transport-https
 if ! command -v caddy >/dev/null; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
@@ -51,7 +51,10 @@ mkdir -p "$APP_DIR/uploads" "$APP_DIR/static/tenant_docs" && chown -R "$APP_USER
 echo "==> Python packages"
 sudo -u "$APP_USER" python3 -m venv "$APP_DIR/.venv"
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
-sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+# Not --quiet: installing takes a few minutes on a small server, and silence looks like a hang.
+sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+# Fail here, loudly, rather than later as a service that restarts forever.
+sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -c "import fastapi, uvicorn, sqlalchemy, greenlet, asyncpg, aiosqlite, openai, av, numpy; print('Python packages OK')"
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"

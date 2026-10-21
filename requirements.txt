@@ -13,3 +13,4 @@ stripe>=10.0.0
 av>=12.0.0          # decodes WhatsApp voice notes to check they contain speech (voice_service.py)
 numpy>=1.26
 asyncpg>=0.29         # PostgreSQL driver: the shared database (e.g. Supabase) in production
+greenlet>=3.0         # needed by SQLAlchemy asyncio; no longer installed automatically on Python 3.14
