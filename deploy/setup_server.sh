@@ -30,7 +30,16 @@ fi
 
 echo "==> App user and code"
 id "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
-if [[ -d "$APP_DIR/.git" ]]; then
+# Where the code comes from: this script's own project folder (copied to the server, no GitHub
+# needed), or GitHub when the script is run on its own.
+SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$SOURCE_DIR/requirements.txt" && -f "$SOURCE_DIR/main.py" ]]; then
+  echo "Installing from the project copy in $SOURCE_DIR"
+  mkdir -p "$APP_DIR"
+  cp -r "$SOURCE_DIR/." "$APP_DIR/"
+  rm -rf "$APP_DIR/.git" "$APP_DIR/.venv" "$APP_DIR/__pycache__"
+  chown -R "$APP_USER" "$APP_DIR"
+elif [[ -d "$APP_DIR/.git" ]]; then
   sudo -u "$APP_USER" git -C "$APP_DIR" fetch --quiet origin "$BRANCH"
   sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 else
