@@ -6,6 +6,10 @@ class Settings(BaseSettings):
     META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "my_secure_meta_verify_token_123")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./whatsapp_bot.db")
     META_GRAPH_API_VERSION: str = os.getenv("META_GRAPH_API_VERSION", "v20.0")
+    # Meta Developer Dashboard -> App settings -> Basic -> App secret. When set, every webhook
+    # POST must carry Meta's X-Hub-Signature-256, so nobody who finds the URL can post fake
+    # customer messages or orders. Set it on any server reachable from the internet.
+    META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
 
     # Bootstrap credentials for the FIRST owner account, only used the very first time
     # the server starts with an empty admin_users table. Change the password afterward

@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import html
 import csv
 import io
@@ -15,7 +17,7 @@ from fastapi import (
     FastAPI, Request, Response, Depends, HTTPException, status, Query,
     UploadFile, File, Form, Header, WebSocket, WebSocketDisconnect, BackgroundTasks
 )
-from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1603,17 +1605,14 @@ async def train_bot_knowledge_base(
 
 @app.get("/health", tags=["Health"])
 async def health_check(db: AsyncSession = Depends(get_db)):
+    # Public (uptime monitors call it): says only whether the database answers. The error itself,
+    # which can name the database host, goes to the server log.
     try:
-        result = await db.execute(select(Tenant))
-        tenants_count = len(result.scalars().all())
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "tenants_count": tenants_count
-        }
+        await db.execute(select(1))
+        return {"status": "healthy", "database": "connected"}
     except Exception as e:
         logger.error(f"Health check database error: {e}")
-        return {"status": "unhealthy", "database_error": str(e)}
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "database": "unreachable"})
 
 
 # ---------------------------------------------------------------------------
@@ -1653,14 +1652,40 @@ async def process_webhook(request: Request, background_tasks: BackgroundTasks):
     that aren't answered quickly, and an AI reply can take seconds on free-tier providers —
     processing inline risked customers receiving the same answer two or three times.
     """
+    raw = await request.body()
+    if not _valid_meta_signature(raw, request.headers.get("x-hub-signature-256")):
+        logger.warning("Rejected a webhook POST with a missing or wrong Meta signature.")
+        return Response(content="Invalid signature", status_code=401)
     try:
-        body = await request.json()
+        body = json.loads(raw)
     except Exception as e:
         logger.error(f"Failed to parse incoming webhook JSON: {e}")
         return Response(content="EVENT_RECEIVED", status_code=200)
 
     background_tasks.add_task(_process_webhook_in_background, body)
     return Response(content="EVENT_RECEIVED", status_code=200)
+
+
+def _valid_meta_signature(raw: bytes, header: Optional[str]) -> bool:
+    """
+    Meta signs each webhook with the app secret: `X-Hub-Signature-256: sha256=<hex HMAC of the
+    raw body>`. Without META_APP_SECRET the check is skipped (local testing) - with a warning,
+    once, because then anyone who learns the URL could post fake messages.
+    """
+    secret = settings.META_APP_SECRET.strip()
+    if not secret:
+        global _signature_warning_shown
+        if not _signature_warning_shown:
+            logger.warning("META_APP_SECRET is not set: webhook signatures are NOT checked. Set it before going live.")
+            _signature_warning_shown = True
+        return True
+    if not header or not header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header.removeprefix("sha256=").strip().lower())
+
+
+_signature_warning_shown = False
 
 
 # One lock per customer, so "hi" and "price?" sent a second apart are answered in order.

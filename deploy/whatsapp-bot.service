@@ -1,0 +1,23 @@
+[Unit]
+Description=WhatsApp AI bot server (webhook, API, portal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=whatsappbot
+WorkingDirectory=/opt/whatsapp-bot
+# Settings come from /opt/whatsapp-bot/.env, which the app reads itself. (Not EnvironmentFile=:
+# systemd would keep the inline "# ..." comments in .env as part of the values.)
+# ONE worker on purpose: live inbox updates and per-customer ordering are kept in memory.
+# Listens on this machine only; Caddy serves it to the internet over HTTPS.
+ExecStart=/opt/whatsapp-bot/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+Restart=always
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/whatsapp-bot
+
+[Install]
+WantedBy=multi-user.target

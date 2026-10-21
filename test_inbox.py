@@ -287,6 +287,29 @@ async def test_all():
             "Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
         check(res.headers.get("access-control-allow-origin") is None, "an unlisted website is not")
 
+        print("\nOnly Meta can post to the webhook (META_APP_SECRET)")
+        import hashlib
+        import hmac
+        import json as _json
+        from config import settings
+        settings.META_APP_SECRET = "test-app-secret"
+        try:
+            raw = _json.dumps(webhook(CUSTOMER, text("signed hello"), "sig1")).encode()
+            good = "sha256=" + hmac.new(b"test-app-secret", raw, hashlib.sha256).hexdigest()
+            before = len(await history(a_id, CUSTOMER))
+            res = await client.post("/webhook", content=raw, headers={"Content-Type": "application/json"})
+            check(res.status_code == 401 and len(await history(a_id, CUSTOMER)) == before,
+                  "an unsigned post is refused and nothing is saved")
+            res = await client.post("/webhook", content=raw, headers={"Content-Type": "application/json",
+                                                                      "X-Hub-Signature-256": "sha256=" + "0" * 64})
+            check(res.status_code == 401, "a wrongly signed post is refused")
+            res = await client.post("/webhook", content=raw, headers={"Content-Type": "application/json",
+                                                                      "X-Hub-Signature-256": good})
+            check(res.status_code == 200 and any(r[1] == "signed hello" for r in await history(a_id, CUSTOMER)),
+                  "Meta's correctly signed post is accepted")
+        finally:
+            settings.META_APP_SECRET = ""
+
 
 async def main_async():
     await init_db()
