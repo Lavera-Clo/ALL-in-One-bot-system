@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 
 from industry_brain import INDUSTRY_KEYS, normalise_industry
@@ -52,9 +52,17 @@ class TenantResponse(TenantBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    # The token itself never leaves the server: the dashboard only needs to know one is saved.
+    meta_access_token: str = Field(default="", exclude=True)
+    has_access_token: bool = False
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="after")
+    def _hide_token(self):
+        self.has_access_token = bool(self.meta_access_token) and "placeholder" not in self.meta_access_token
+        return self
 
 # Helper schemas for WhatsApp Webhook parsing
 class WhatsAppProfile(BaseModel):

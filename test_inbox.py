@@ -46,7 +46,7 @@ def check(condition, label):
 seen_histories = []
 
 
-async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config):
+async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config, **_):
     seen_histories.append((user_message, [m["content"] for m in chat_history]))
     if "discount" in user_message.lower():
         return ai_service.BotReply("Let me pass you to our manager.", handoff=True)

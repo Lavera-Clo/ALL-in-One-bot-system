@@ -35,6 +35,9 @@ def _summary(kind: str, a: dict) -> str:
     if kind == "buttons":
         titles = " · ".join(f"[{b.get('title')}]" for b in (a.get("buttons") or [])[:3])
         return f"{a.get('body_text') or ''}\n{titles}".strip()
+    if kind == "voice":
+        spoken = a.get("spoken_text") or ""
+        return f"[Voice note] {spoken}".strip()
     if kind == "list":
         rows = [r.get("title") for s in (a.get("sections") or []) for r in s.get("rows", [])]
         return f"{a.get('body_text') or ''}\n[List: {', '.join(rows[:10])}]".strip()
@@ -296,6 +299,87 @@ async def send_whatsapp_document(
         except Exception as e:
             logger.error(f"Failed to send WhatsApp document to {recipient_phone}: {str(e)}")
             raise e
+
+
+async def send_whatsapp_typing_indicator(
+    phone_number_id: str,
+    message_id: str,
+    meta_access_token: str
+) -> bool:
+    """
+    Marks the customer's message as read (blue ticks) and shows "typing..." in their chat while
+    the reply is written. WhatsApp hides the indicator when the next message arrives or after
+    about 25 seconds. Never raises: a missing indicator must not stop the reply.
+    """
+    if not message_id or not meta_access_token or "placeholder" in meta_access_token:
+        return False
+
+    url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {meta_access_token}", "Content-Type": "application/json"}
+    read_receipt = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json={**read_receipt, "typing_indicator": {"type": "text"}},
+                                         headers=headers, timeout=8.0)
+            if response.status_code == 200:
+                return True
+            # Older Graph API versions reject the typing field: still send the read receipt
+            logger.warning(f"Typing indicator rejected ({response.status_code}): {response.text[:200]}")
+            await client.post(url, json=read_receipt, headers=headers, timeout=8.0)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not send typing indicator: {e}")
+    return False
+
+
+@_reported("voice")
+async def send_whatsapp_voice_note(
+    phone_number_id: str,
+    recipient_phone: str,
+    audio_bytes: bytes,
+    mime_type: str,
+    meta_access_token: str,
+    spoken_text: str = ""
+) -> dict:
+    """
+    Uploads generated speech to Meta and sends it as a voice note. `spoken_text` is what the
+    voice says; it is only used to show the voice note in the inbox.
+    """
+    if meta_access_token.startswith("EAA_placeholder") or "placeholder" in meta_access_token:
+        logger.info(f"[MOCK WHATSAPP SENDER] Voice note to {recipient_phone}: {len(audio_bytes)} bytes of {mime_type}")
+        return {"status": "mock_sent", "recipient": recipient_phone}
+
+    base_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{phone_number_id}"
+    auth = {"Authorization": f"Bearer {meta_access_token}"}
+    is_ogg = mime_type == "audio/ogg"
+    filename = "voice_note.ogg" if is_ogg else "voice_note.mp3"
+
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        upload = await client.post(
+            f"{base_url}/media",
+            headers=auth,
+            files={"file": (filename, audio_bytes, mime_type)},
+            data={"messaging_product": "whatsapp", "type": mime_type},
+        )
+        upload.raise_for_status()
+        media_id = upload.json().get("id")
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": recipient_phone,
+            "type": "audio",
+            "audio": {"id": media_id},
+        }
+        # "voice": true gives the voice-note bubble; older Graph API versions reject the field
+        if is_ogg:
+            response = await client.post(f"{base_url}/messages", headers=auth,
+                                         json={**payload, "audio": {"id": media_id, "voice": True}})
+            if response.status_code == 200:
+                return response.json()
+            logger.warning(f"Voice-note bubble rejected ({response.status_code}); sending as plain audio")
+        response = await client.post(f"{base_url}/messages", headers=auth, json=payload)
+        response.raise_for_status()
+        return response.json()
 
 
 async def notify_human_agent(

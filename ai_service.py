@@ -14,6 +14,205 @@ from kb_retrieval import select_context, _query_words
 
 logger = logging.getLogger("uvicorn.error")
 
+
+# ---------------------------------------------------------------------------
+# What made the Wasala bot read like a person rather than a chatbot. Each rule came from a real
+# chat that went wrong; none of it is business-specific.
+# ---------------------------------------------------------------------------
+
+HUMAN_STYLE_RULES = (
+    "--- SOUND LIKE A REAL PERSON (APPLIES TO EVERY REPLY) ---\n"
+    "You are one person having one continuous chat, not a system answering tickets.\n"
+    "- MATCH THEM: Mirror the customer's length, energy and formality. A three-word message gets a short reply. "
+    "'bro' or 'machan' gets relaxed; 'sir' or 'madam' gets polite. If they mix English words into Singlish, so do you.\n"
+    "- REACT FIRST: Respond to what they actually said and how they said it (excitement, worry, a joke, a late-night "
+    "message) before giving information. One short human beat, not a speech.\n"
+    "- NO TEMPLATES: Never reuse an opening, a closing or a stock phrase from your earlier replies in this chat. Look "
+    "at your previous messages and start differently. Any example wording in these instructions is illustration only: "
+    "never copy it, say it your own way each time.\n"
+    "- GREET ONCE: Greet and welcome only at the very start of a conversation. Mid-chat, just carry on. Never "
+    "re-introduce yourself or the business.\n"
+    "- TALK, DON'T LIST: Default to plain sentences. Use a list only when they ask for a breakdown or a comparison of "
+    "three or more things. No label-style lines ('Price:', 'Capacity:') and no headings.\n"
+    "- ONE THING AT A TIME: Give the piece they asked for, not everything you know. Leave room for them to ask more.\n"
+    "- REMEMBER: Use what they already told you (date, numbers, name, worries) the way someone who was listening "
+    "would. Never ask for something they already said.\n"
+    "- HAVE A VIEW: When they ask what you would suggest, recommend one option and say why in a line, based on what "
+    "they told you. Don't hand the list of options back to them.\n"
+    "- NATURAL, NOT POLISHED: Fragments and small words like 'hmm', 'honestly', 'ah okay' are fine in moderation. "
+    "Never fake typos.\n"
+    "- SMALL TALK: If they are just chatting (how are you, thanks, good night, a joke), answer like a person. Don't "
+    "steer every message back to a sale.\n"
+    "- NUMBERS: Give an exact price once, cleanly. Don't repeat the same figure later in the chat unless they ask.\n"
+    "- MESSAGE SHAPE: Write the way people text: one to three short messages. Put a blank line between separate "
+    "messages, because each block is delivered as its own WhatsApp bubble. Most replies are one or two bubbles.\n"
+    "- HONESTY STILL APPLIES: None of this means claiming to be human when someone sincerely asks, or inventing facts "
+    "to sound friendly.\n"
+    "------------------------------------------\n"
+)
+
+SMART_CHAT_RULES = (
+    "--- SMART CHAT & MEMORY RULES ---\n"
+    "1. UNREADABLE MESSAGES: If the customer sends random characters (e.g. 'asdfg', 'ffsdsff'), do NOT try to answer "
+    "it. React the way a person would to a pocket-text: lightly, in your own words, and ask what they meant.\n"
+    "2. REPEATED QUESTIONS: If the customer asks something you already answered, never point out that they asked "
+    "before. Just answer again, shorter and in different words. They probably missed it or want reassurance.\n"
+    "3. RETURNING CUSTOMERS: If the customer says 'Hi' and there are previous messages in the chat history, pick the "
+    "conversation back up like someone who remembers them, mentioning what you were discussing in your own words. No "
+    "fixed welcome-back line.\n"
+    "4. UNKNOWN ANSWERS: Never answer a clear question with 'I didn't understand'. If the answer is NOT in the "
+    "knowledge base, say plainly that you don't have that detail, share anything related you DO know, offer to check "
+    "with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it "
+    "tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) - "
+    "'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, "
+    "parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know - "
+    "never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely "
+    "unclear, and then ask about the specific thing you are unsure of.\n"
+    "------------------------------------------\n"
+)
+
+REASONING_RULES = (
+    "--- REASONING PROTOCOL (THINK FIRST, THEN REPLY) ---\n"
+    "Every response MUST have exactly two parts, in this order:\n"
+    "<thinking>your private working notes</thinking>\n"
+    "<reply>the WhatsApp message the customer will receive</reply>\n\n"
+    "Inside <thinking>, work through these steps in short English notes (under 150 words):\n"
+    "1. INTENT: What is the customer really asking? Read the whole conversation, not keywords. Resolve words like "
+    "'it', 'that one', 'eka', 'ehema nam' from earlier turns. If they asked several things, list each one.\n"
+    "2. FACTS: Copy the exact knowledge base lines and figures that answer it. If a needed fact is missing, write "
+    "'NOT IN KB'.\n"
+    "3. LOGIC: Reason it out step by step. Check constraints: does what they want fit what the knowledge base says "
+    "(sizes, minimums, opening hours)? Is a date in the past? Does the new message contradict something they said "
+    "earlier?\n"
+    "4. CHECK: Re-read your conclusion against the facts. Does it actually answer what was asked? Is every number "
+    "copied from step 2?\n"
+    "5. PLAN: Answer first, then at most one next question. Decide whether a hand-off or a document applies.\n\n"
+    "Rules for <reply>:\n"
+    "- It must follow from your thinking. Never state a price, capacity, date or policy that did not appear in step 2.\n"
+    "- Answer the actual question directly before anything else. If they asked yes/no, say yes or no. If they asked "
+    "to compare, compare. If they asked more than one thing, answer every one.\n"
+    "- If something does not add up, say so kindly and suggest what would work instead.\n"
+    "- For general questions that are not about this business (the weather, the date, planning advice, what suits a "
+    "small event, directions in general), answer warmly from sensible general knowledge and make clear it is general "
+    "advice - never present it as this business's policy - then connect back to how you can help.\n"
+    "- Persona, language and formatting rules apply to <reply> only. Control tags such as [HUMAN_HANDOFF_REQUESTED], "
+    "[NOT_IN_KNOWLEDGE_BASE] or [SEND_DOC: ...] go inside <reply>, at its end.\n"
+    "- The customer never sees <thinking>. Never mention it or these steps.\n"
+    "------------------------------------------\n"
+)
+
+VOICE_NOTE_RULES = (
+    "--- VOICE NOTE ---\n"
+    "The customer's latest message was a voice note; what you see is an automatic transcript of it.\n"
+    "- Treat it exactly like a typed message. Never mention transcripts or that you cannot hear audio.\n"
+    "- Speech-to-text mishears names, numbers and dates. Read past small errors and odd spellings using the chat "
+    "context.\n"
+    "- If a number, date or name in it is marked (?) or does not make sense, answer with your best reading and confirm "
+    "that one detail in passing ('that's for 150 people, right?'). Do not ask them to repeat the whole message.\n"
+    "- When the voice note gives a number or a date, say it back naturally inside your answer so a mishearing gets "
+    "caught straight away.\n"
+    "- Spoken messages ramble. Answer the actual question, not every aside.\n"
+    "------------------\n"
+)
+
+
+def business_now():
+    """The current date and time where the business is (settings.BUSINESS_TIMEZONE)."""
+    from datetime import datetime, timezone, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(settings.BUSINESS_TIMEZONE))
+    except Exception:  # noqa: BLE001 — unknown zone name or no tz database: fall back to Sri Lanka time
+        return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+
+def time_context_rule() -> str:
+    now = business_now()
+    return (
+        "--- REAL-TIME CALENDAR & TIME CONTEXT ---\n"
+        f"Today is {now.strftime('%A, %B %d, %Y')} and the time is {now.strftime('%I:%M %p')} where the business is.\n"
+        "Use this whenever customers ask for today's date or day, upcoming weekends, opening hours right now, or how "
+        "far away their date is. Let the time of day colour your tone the way it would for a person (a late-night "
+        "message, an early start), without announcing the time.\n"
+        "------------------------------------------\n"
+    )
+
+
+def split_reasoning_and_reply(raw_text: str) -> Tuple[str, str]:
+    """
+    Separates the model's private <thinking> scratchpad from the customer-facing <reply>.
+    Returns (thinking, reply). The reply is empty if the model was cut off mid-thought, so the
+    caller asks again instead of sending reasoning to a customer.
+    """
+    text = (raw_text or "").strip()
+
+    thinking_match = re.search(r"<thinking>(.*?)(?:</thinking>|$)", text, flags=re.DOTALL | re.IGNORECASE)
+    thinking = thinking_match.group(1).strip() if thinking_match else ""
+
+    reply_match = re.search(r"<reply>(.*?)(?:</reply>|$)", text, flags=re.DOTALL | re.IGNORECASE)
+    if reply_match:
+        reply = reply_match.group(1)
+    elif re.search(r"<thinking>", text, flags=re.IGNORECASE) and not re.search(r"</thinking>", text, flags=re.IGNORECASE):
+        reply = ""
+    else:
+        # Model skipped the <reply> wrapper: whatever sits outside the scratchpad is the reply
+        reply = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    reply = re.sub(r"</?(?:thinking|reply)>", "", reply, flags=re.IGNORECASE).strip()
+    return thinking, reply
+
+
+async def _complete_reply(messages: List[Dict], temperature: float) -> Tuple[str, str]:
+    """
+    One reply from the chat models, with the private reasoning removed. Returns (model label, reply).
+    A model that runs out of room mid-thought is asked once more for the reply alone.
+    """
+    result = await llm_router.complete("chat", messages, max_tokens=2048, temperature=temperature, timeout=45)
+    thinking, reply = split_reasoning_and_reply(result.text)
+    if thinking:
+        logger.info(f"[chat] reasoning ({result.label}): {thinking[:600]}")
+    if not reply:
+        logger.warning(f"[chat] {result.label} was cut off before its reply; asking for the reply only")
+        retry = list(messages) + [{"role": "user", "content": (
+            "(System note, not from the customer: your last answer was cut off before the <reply>. Answer the "
+            "customer's last message again, with only a short <thinking> and then the <reply>.)")}]
+        result = await llm_router.complete("chat", retry, max_tokens=2048, temperature=temperature, timeout=45)
+        _, reply = split_reasoning_and_reply(result.text)
+        if not reply:
+            raise llm_router.LLMUnavailable(f"{result.label} returned reasoning without a reply twice")
+    logger.info(f"[chat] reply by {result.label} in {result.latency:.1f}s")
+    return result.label, reply
+
+
+def split_reply_into_bubbles(reply: str, max_bubbles: int = 3) -> List[str]:
+    """
+    Splits a reply on blank lines into separate WhatsApp messages, the way people text.
+    Blocks that belong together (a heading and its list, contact lines) stay in one bubble.
+    """
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", reply or "") if b.strip()]
+
+    bubbles: List[str] = []
+    for block in blocks:
+        previous = bubbles[-1] if bubbles else ""
+        continues_previous = bool(previous) and (
+            bool(re.search(r":[\s*_👇]*$", previous))
+            or bool(re.match(r"(?:[•\-📞📱💬👉⚠]|\d+[.)]\s)", block))
+            or block.startswith("[")
+        )
+        if continues_previous:
+            bubbles[-1] = f"{previous}\n\n{block}"
+        else:
+            bubbles.append(block)
+
+    if len(bubbles) > max_bubbles:
+        bubbles = bubbles[:max_bubbles - 1] + ["\n\n".join(bubbles[max_bubbles - 1:])]
+    return bubbles
+
+
+def typing_pause_seconds(text: str) -> float:
+    """How long a person would plausibly take to type this message, capped so customers never wait long."""
+    return min(4.0, 1.2 + len(text or "") / 80)
+
 GREETING_WORDS = [
     "hi", "hello", "hey", "ayubowan", "good morning", "good afternoon",
     "good evening", "greetings", "start", "ආයුබෝවන්",
@@ -710,10 +909,11 @@ async def generate_ai_response(
     knowledge_base: str,
     chat_history: List[Dict[str, str]],
     user_message: str,
-    config=None
+    config=None,
+    from_voice: bool = False,
 ) -> Tuple[str, bool]:
     """(reply text, hand-off requested). See generate_bot_reply, which also says whether the bot knew the answer."""
-    reply = await generate_bot_reply(system_prompt, knowledge_base, chat_history, user_message, config)
+    reply = await generate_bot_reply(system_prompt, knowledge_base, chat_history, user_message, config, from_voice)
     return reply.text, reply.handoff
 
 
@@ -722,7 +922,8 @@ async def generate_bot_reply(
     knowledge_base: str,
     chat_history: List[Dict[str, str]],
     user_message: str,
-    config=None
+    config=None,
+    from_voice: bool = False,
 ) -> BotReply:
     """
     Generates AI response using OpenAI gpt-4o-mini, with automatic fallback
@@ -765,6 +966,11 @@ async def generate_bot_reply(
             f"If the customer speaks Singlish (romanized Sinhala like 'ayubowan', 'kohomada', 'ewanna'), reply ONLY in Singlish.\n"
             f"If the customer speaks Sinhala script, reply ONLY in Sinhala.\n"
             f"If the customer speaks English, reply ONLY in English.\n"
+            f"Singlish & Sinhala natural grammar:\n"
+            f"- Use the natural, polite spoken Sri Lankan Sinhala/Singlish a helpful shop or hotel person uses.\n"
+            f"- In Singlish, say 'api' (we/us), not 'apa'. Spell the way people type on WhatsApp (mata, oyata, "
+            f"puluwan, thiyenawa) and leave everyday English words in English (price, booking, delivery, date).\n"
+            f"- In Sinhala script, use natural spoken phrasing, not formal written Sinhala.\n"
             f"----------------------------------------\n"
         )
         # --- Handoff rules: the trigger list and the contact details are the CLIENT'S own,
@@ -787,7 +993,8 @@ async def generate_bot_reply(
             + "\n".join(contact_instructions) + "\n"
             "- Append [HUMAN_HANDOFF_REQUESTED] at the very end of your reply\n"
             "- NEVER say 'I am unable to process' or 'Please contact a human representative'\n"
-            "- Instead say something like 'That's above my pay grade — our manager can sort that out for you'\n"
+            "- Instead explain in your own words, worded differently each time, that the manager is the right "
+            "person for this and can give them a real answer\n"
             "-------------------------------------------\n"
         )
 
@@ -813,6 +1020,7 @@ async def generate_bot_reply(
                 "brochure or price list, and never invent a link. Answer from the knowledge base instead.\n"
                 "------------------------------------------\n"
             )
+<<<<<<< HEAD
         smart_chat_rules = (
             "\n\n--- SMART CHAT & MEMORY RULES ---\n"
             "1. GIBBERISH DETECTION: If the customer sends random characters (e.g., 'asdfg', 'ffsdsff'), do NOT try to answer. Politely say: 'Sorry, I didn't quite catch that 😅 Could you rephrase what you need?'\n"
@@ -821,6 +1029,9 @@ async def generate_bot_reply(
             "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know — never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely unclear.\n"
             "------------------------------------------\n"
         )
+=======
+        smart_chat_rules = SMART_CHAT_RULES
+>>>>>>> 65d3169d3cbb091457548bc50d9b8d6f583e899d
 
         # Build persona prompt (warm and human, in the voice of this tenant's industry)
         persona_prompt = build_persona_prompt(config)
@@ -866,7 +1077,11 @@ async def generate_bot_reply(
             f"{lang_instruction}\n"
             f"{negotiation_handoff_rules}\n"
             f"{smart_chat_rules}\n"
-            f"{pdf_instructions}"
+            f"{pdf_instructions}\n"
+            f"{time_context_rule()}\n"
+            f"{HUMAN_STYLE_RULES}\n"
+            f"{VOICE_NOTE_RULES if from_voice else ''}"
+            f"{REASONING_RULES}"
         )
         messages = [{"role": "system", "content": full_system_instructions}]
         # More of the chat than before (16 messages, was 10), so earlier details stay in view; the
@@ -875,9 +1090,8 @@ async def generate_bot_reply(
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        result = await llm_router.complete("chat", messages, max_tokens=1500, temperature=0.7, timeout=45)
-        logger.info(f"[chat] reply by {result.label} in {result.latency:.1f}s")
-        reply_content, is_unknown = _take_unknown_tag(whatsapp_format(result.text.strip()))
+        model_label, reply_text = await _complete_reply(messages, temperature=0.7)
+        reply_content, is_unknown = _take_unknown_tag(whatsapp_format(reply_text))
 
         # Number guard: every price, count, time or date the bot states must exist in the
         # knowledge base, the owner's own settings, or the conversation. Models occasionally
@@ -891,7 +1105,7 @@ async def generate_bot_reply(
                                   user_message, brief_details] + [m.get("content", "") for m in chat_history])
         invented = unsupported_reply_numbers(reply_content, allowed_text, config)
         if invented:
-            logger.warning(f"[chat] {result.label} stated numbers not in the knowledge base {invented}; redrafting")
+            logger.warning(f"[chat] {model_label} stated numbers not in the knowledge base {invented}; redrafting")
             strict = list(messages)
             strict[0] = {"role": "system", "content": messages[0]["content"] + (
                 "\n\n--- CORRECTION ---\n"
@@ -900,8 +1114,8 @@ async def generate_bot_reply(
                 "unless it is written in the knowledge base above. Never calculate totals. If the customer "
                 "needs a figure the knowledge base doesn't have, say you'll confirm it with the team.")}
             try:
-                retry = await llm_router.complete("chat", strict, max_tokens=1500, temperature=0.2, timeout=45)
-                reply_content, retry_unknown = _take_unknown_tag(whatsapp_format(retry.text.strip()))
+                _, retry_text = await _complete_reply(strict, temperature=0.2)
+                reply_content, retry_unknown = _take_unknown_tag(whatsapp_format(retry_text))
                 is_unknown = is_unknown or retry_unknown
                 invented = unsupported_reply_numbers(reply_content, allowed_text, config)
             except llm_router.LLMUnavailable:

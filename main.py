@@ -1,8 +1,11 @@
 import asyncio
+import time
 import hashlib
 import hmac
 import html
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -66,8 +69,9 @@ from understanding_service import (
 from ai_service import (
     generate_ai_response, generate_bot_reply, detect_language_intent,
     get_pdfs_for_user_message, resolve_reply_documents, DOC_REQUEST_WORDS,
-    classify_product_from_image,
+    classify_product_from_image, split_reply_into_bubbles, typing_pause_seconds,
 )
+from voice_reply_service import build_spoken_reply, synthesize_voice_note
 from whatsapp_client import (
     WhatsAppCredentialsError,
     verify_whatsapp_number,
@@ -77,7 +81,9 @@ from whatsapp_client import (
     send_whatsapp_button_message,
     send_whatsapp_list_message,
     notify_human_agent,
-    download_whatsapp_media
+    download_whatsapp_media,
+    send_whatsapp_typing_indicator,
+    send_whatsapp_voice_note,
 )
 from order_service import (
     get_active_products,
@@ -153,16 +159,18 @@ async def lifespan(app: FastAPI):
     if interrupted_tests:
         logger.warning(f"{interrupted_tests} bot test run(s) were interrupted by the restart.")
 
-    # Automatically seed Wasala Nature Resort tenant if not present
+    if settings.ADMIN_PASSWORD == "admin123":
+        logger.warning("ADMIN_PASSWORD is still the default: set your own in .env before going live.")
+
+    # Seed the first tenant (Wasala Nature Resort) on a brand-new database only. Its WhatsApp
+    # token comes from .env; an existing tenant's token is never touched here.
     async with AsyncSessionLocal() as session:
-        stmt = select(Tenant).where(Tenant.whatsapp_phone_number_id == "1157440684128924")
-        existing = (await session.execute(stmt)).scalar_one_or_none()
-        NEW_TOKEN = "EAAjfYY4wqiYBSWivwPb8V5cB6wbqZC0b2pLr6fjzTAuVqfU57FQc5V7fd4uYCZCFnzCUwHAF0sRqmQCnsAgjVnWrAsvLgHZAalZBwgRg2fONnit5IZBrx8Sdnyf91C8StvHrM5RBaPIzfQKJMgR3P3veTRi6gtfZA1jO38zUirUPdTpUjGRAxN7KGEZBSuuihrLsQZDZD"
-        if not existing:
+        tenant_count = (await session.execute(select(func.count(Tenant.id)))).scalar() or 0
+        if tenant_count == 0:
             wasala_tenant = Tenant(
                 business_name="Wasala Nature Resort - Banquet & Events",
-                whatsapp_phone_number_id="1157440684128924",
-                meta_access_token=NEW_TOKEN,
+                whatsapp_phone_number_id=settings.SEED_PHONE_NUMBER_ID,
+                meta_access_token=settings.META_ACCESS_TOKEN or "EAA_placeholder_set_META_ACCESS_TOKEN",
                 system_prompt=(
                     "You are the senior Banquet & Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. "
                     "Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices."
@@ -217,10 +225,6 @@ async def lifespan(app: FastAPI):
             session.add(wasala_tenant)
             await session.commit()
             logger.info("Successfully auto-seeded Wasala Nature Resort tenant into database!")
-        else:
-            existing.meta_access_token = NEW_TOKEN
-            await session.commit()
-            logger.info("Successfully updated Meta access token for existing tenant in database!")
 
         # Bootstrap the first owner admin account, only when no admin users exist yet.
         admin_count_stmt = select(func.count(AdminUser.id))
@@ -2286,13 +2290,19 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
 
                     dynamic_kb = await get_dynamic_kb(tenant, db)
 
+                    # Blue ticks and "typing..." while the reply is being written
+                    received_at = time.monotonic()
+                    await send_whatsapp_typing_indicator(
+                        tenant.whatsapp_phone_number_id, message.get("id"), tenant.meta_access_token)
+
                     # Generate Multilingual AI Response (gpt-4o-mini / Local Simulator)
                     bot_reply = await generate_bot_reply(
                         system_prompt=tenant.system_prompt,
                         knowledge_base=dynamic_kb,
                         chat_history=formatted_history,
                         user_message=user_text,
-                        config=bot_config
+                        config=bot_config,
+                        from_voice=msg_type == "audio",
                     )
                     ai_reply, is_handoff_requested = bot_reply.text, bot_reply.handoff
 
@@ -2313,13 +2323,41 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                          language=detect_language_intent(user_text, formatted_history),
                                          customer_phone=customer_phone)
 
-                    # Send AI response back to customer via Meta Cloud API
-                    await send_whatsapp_message(
-                        phone_number_id=tenant.whatsapp_phone_number_id,
-                        recipient_phone=customer_phone,
-                        message_text=ai_reply,
-                        meta_access_token=tenant.meta_access_token
-                    )
+                    # A customer who spoke gets spoken to: voice note first, then the same reply in text
+                    if msg_type == "audio" and settings.VOICE_REPLIES and ai_reply:
+                        try:
+                            spoken = await build_spoken_reply(ai_reply)
+                            audio_bytes, audio_mime = await synthesize_voice_note(spoken)
+                            if audio_bytes:
+                                await send_whatsapp_voice_note(
+                                    phone_number_id=tenant.whatsapp_phone_number_id,
+                                    recipient_phone=customer_phone,
+                                    audio_bytes=audio_bytes,
+                                    mime_type=audio_mime,
+                                    meta_access_token=tenant.meta_access_token,
+                                    spoken_text=spoken,
+                                )
+                        except Exception as voice_err:
+                            logger.error(f"Could not reply with a voice note: {voice_err}")
+
+                    # Send the reply as separate short messages with a typing-speed pause between them.
+                    # Without a real token (local testing) nothing is sent, so nobody needs to wait.
+                    pause_for_typing = "placeholder" not in (tenant.meta_access_token or "placeholder")
+                    for bubble_index, bubble in enumerate(split_reply_into_bubbles(ai_reply)):
+                        pause = typing_pause_seconds(bubble)
+                        if bubble_index == 0:
+                            pause -= time.monotonic() - received_at
+                        else:
+                            await send_whatsapp_typing_indicator(
+                                tenant.whatsapp_phone_number_id, message.get("id"), tenant.meta_access_token)
+                        if pause > 0 and pause_for_typing:
+                            await asyncio.sleep(pause)
+                        await send_whatsapp_message(
+                            phone_number_id=tenant.whatsapp_phone_number_id,
+                            recipient_phone=customer_phone,
+                            message_text=bubble,
+                            meta_access_token=tenant.meta_access_token
+                        )
 
                     # Send attached PDF document(s) — but not one this customer received in the
                     # last few hours, unless they explicitly asked for a file again.

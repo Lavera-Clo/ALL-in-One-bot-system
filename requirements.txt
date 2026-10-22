@@ -15,3 +15,6 @@ numpy>=1.26
 asyncpg>=0.29         # PostgreSQL driver: the shared database (e.g. Supabase) in production
 greenlet>=3.0         # needed by SQLAlchemy asyncio; no longer installed automatically on Python 3.14
 pypdf>=4.0            # reads PDF documents for training (training_pipeline.py, document_service.py)
+pytest>=8.0.0         # runs the tests in tests/
+edge-tts>=7.3.1       # free neural voices for voice-note replies (voice_reply_service.py)
+tzdata>=2024.1        # time-zone data, so the bot knows the local date and time on Windows too
