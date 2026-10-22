@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # POST must carry Meta's X-Hub-Signature-256, so nobody who finds the URL can post fake
     # customer messages or orders. Set it on any server reachable from the internet.
     META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
+    # WhatsApp access token and phone number ID for the tenant seeded on a brand-new database.
+    # Later tenants get theirs from the admin dashboard.
+    META_ACCESS_TOKEN: str = ""
+    SEED_PHONE_NUMBER_ID: str = "1157440684128924"
 
     # Bootstrap credentials for the FIRST owner account, only used the very first time
     # the server starts with an empty admin_users table. Change the password afterward

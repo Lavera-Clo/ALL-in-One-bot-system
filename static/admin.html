@@ -951,7 +951,8 @@ PREMIER MENU PACKAGES:
                     document.getElementById('businessName').value  = data.business_name || '';
                     document.getElementById('systemPrompt').value  = data.system_prompt || '';
                     document.getElementById('phoneNumberId').value = data.whatsapp_phone_number_id || '';
-                    document.getElementById('metaAccessToken').value = data.meta_access_token || '';
+                    document.getElementById('metaAccessToken').value = '';
+                    document.getElementById('metaAccessToken').placeholder = data.has_access_token ? 'Token saved. Leave blank to keep it.' : 'EAA... (no token saved yet)';
                     document.getElementById('handoffNumber').value = data.human_handoff_number || '';
                     document.getElementById('frontOfficeNumber').value = data.front_office_number || '';
                     if (data.knowledge_base) {
