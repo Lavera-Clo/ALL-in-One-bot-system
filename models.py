@@ -197,6 +197,11 @@ class Conversation(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     changed_us: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # What the bot remembers about this conversation (conversation_memory.py): the customer's
+    # goal, how far along they are, details they already gave, what is still open. JSON text,
+    # refreshed in the background; memory_upto_id = the last message it has read.
+    memory: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_upto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def display_name(self) -> str:

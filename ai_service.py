@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from config import settings
 from prompts.persona_system_prompt import build_persona_prompt
 import llm_router
+import conversation_memory
 from industry_brain import last_topic, playbook_prompt
 from kb_retrieval import select_context, _query_words
 
@@ -816,7 +817,7 @@ async def generate_bot_reply(
             "\n\n--- SMART CHAT & MEMORY RULES ---\n"
             "1. GIBBERISH DETECTION: If the customer sends random characters (e.g., 'asdfg', 'ffsdsff'), do NOT try to answer. Politely say: 'Sorry, I didn't quite catch that 😅 Could you rephrase what you need?'\n"
             "2. REPEATED QUESTIONS: If the customer asks the exact same question they already asked earlier in the chat history, do NOT just dump the same answer again. Acknowledge it by saying 'You actually asked about this earlier — here's what I shared:' and summarize the past answer briefly, asking if they need more specific details.\n"
-            "3. RETURNING CUSTOMERS: If the customer says 'Hi' and there are previous messages in the chat history, greet them as a returning customer ('Welcome back! Last time we were chatting about [Topic]. How can I help today?').\n"
+            "3. RETURNING CUSTOMERS: Only welcome someone back when the notes below say they are coming back after a gap. In an ongoing chat never greet again or say 'welcome back' - just continue.\n"
             "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know — never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely unclear.\n"
             "------------------------------------------\n"
         )
@@ -847,11 +848,18 @@ async def generate_bot_reply(
         logger.info(f"[chat] knowledge base: {kb_info.get('mode')} {kb_info.get('chars')}"
                     f"/{kb_info.get('of', kb_info.get('chars'))} chars {kb_info.get('sections', '')}")
 
+        # Who this is and where the conversation stands (conversation_memory.py), so the reply
+        # continues the chat instead of starting over.
+        conversation_ctx = getattr(config, "conversation", None)
+        conversation_notes = conversation_memory.context_prompt(conversation_ctx)
+
         full_system_instructions = (
             f"{persona_prompt}\n\n"
             f"{system_prompt}\n\n"
             f"{industry_playbook}\n\n"
             f"{owner_playbook}"
+            f"{conversation_notes}\n"
+            f"{conversation_memory.CONTINUITY_RULES}\n"
             f"--- KNOWLEDGE BASE (the parts relevant to this message) ---\n"
             f"{kb_context}\n"
             f"----------------------\n"
@@ -861,7 +869,9 @@ async def generate_bot_reply(
             f"{pdf_instructions}"
         )
         messages = [{"role": "system", "content": full_system_instructions}]
-        for msg in chat_history[-10:]:
+        # More of the chat than before (16 messages, was 10), so earlier details stay in view; the
+        # conversation notes cover anything older.
+        for msg in chat_history[-16:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
@@ -874,8 +884,11 @@ async def generate_bot_reply(
         # invent a figure when the fact is missing (measured: "parking for around 120 cars"
         # when the document only says "adequate parking"). A wrong number on a quote is a
         # promise the business can't keep, so: redraft once, then refuse to guess.
+        # Numbers the customer gave earlier (kept in the conversation notes after old messages are
+        # cleaned up) may be repeated back to them: "for your 120 guests".
+        brief_details = " ".join(str(v) for v in ((getattr(conversation_ctx, "brief", None) or {}).get("details") or {}).values())
         allowed_text = "\n".join([knowledge_base or "", system_prompt or "", config.handoff_rules or "",
-                                  user_message] + [m.get("content", "") for m in chat_history])
+                                  user_message, brief_details] + [m.get("content", "") for m in chat_history])
         invented = unsupported_reply_numbers(reply_content, allowed_text, config)
         if invented:
             logger.warning(f"[chat] {result.label} stated numbers not in the knowledge base {invented}; redrafting")
@@ -901,6 +914,8 @@ async def generate_bot_reply(
         reply_content = reply_content.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
         if not is_unknown and not is_human_handoff and _sounds_unsure(reply_content):
             is_unknown = True
+        # Update the conversation notes in the background (never delays this reply).
+        conversation_memory.refresh_later(conversation_ctx, config.business_name)
         return BotReply(reply_content, is_human_handoff, is_unknown)
 
     except Exception as e:

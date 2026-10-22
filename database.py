@@ -101,6 +101,8 @@ _COLUMN_MIGRATIONS = [
     ("conversations", "notes", "TEXT"),
     ("conversations", "message_count", "INTEGER NOT NULL DEFAULT 0"),
     ("conversations", "changed_us", "BIGINT"),
+    ("conversations", "memory", "TEXT"),
+    ("conversations", "memory_upto_id", "INTEGER"),
 ]
 
 # Indexes for columns added by migration (create_all only indexes brand-new tables).

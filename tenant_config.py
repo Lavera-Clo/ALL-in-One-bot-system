@@ -59,6 +59,9 @@ class BotConfig:
     button_titles: List[str] = field(default_factory=list)   # the client's own greeting buttons, if any
     menu_titles: List[str] = field(default_factory=list)     # what the client calls their own offerings
     playbook: str = ""        # the owner's conversation playbook(s), see playbook_pipeline.py
+    # This customer and this conversation (conversation_memory.ConversationContext): their name,
+    # time since they last wrote, and what the bot remembers. Set per message by the webhook.
+    conversation: Optional[object] = None
 
     # ---------- derived helpers, used when building prompts and replies ----------
 

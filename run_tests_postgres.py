@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 SUITES = ["test_industry_brain.py", "test_learning_and_selftest.py", "test_platform_accounts.py",
-          "test_onboarding_and_playbooks.py", "test_inbox.py", "test_voice.py", "test_sync_and_retention.py"]
+          "test_onboarding_and_playbooks.py", "test_inbox.py", "test_voice.py", "test_sync_and_retention.py", "test_conversation_memory.py"]
 
 
 def main() -> int:

@@ -119,6 +119,7 @@ from sync_service import (
     HISTORY_DAYS_ALLOWED, apply_statuses, cleanup_old_messages, contact_payload, find_by_client_id,
     list_contacts, message_stats, record_device_message, sync_changes, update_contact,
 )
+from conversation_memory import build_context as build_conversation_context, load_brief as load_conversation_brief
 from voice_service import (
     bot_text as voice_bot_text, fallback_reply as voice_fallback_reply, hear_voice_note,
     inbox_text as voice_inbox_text,
@@ -1099,6 +1100,9 @@ async def inbox_messages(tenant_id: int, phone: str, limit: int = Query(300, ge=
     return {
         "phone": phone,
         "name": conv.display_name if conv else "",
+        # What the bot has understood about this customer (goal, stage, details, open questions),
+        # for a person taking over the chat.
+        "brief": load_conversation_brief(conv.memory) if conv else {},
         "bot_enabled": conv.bot_enabled if conv else True,
         "needs_human": bool(conv and conv.needs_human),
         "messages": await chat_messages(db, tenant_id, phone, limit),
@@ -2276,7 +2280,10 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # documents all come from their own row, never from shared constants.
                     tenant_documents = await get_tenant_documents(db, tenant.id, active_only=True)
                     bot_config = build_bot_config(tenant, tenant_documents)
-                    
+                    # Who this is and where the chat stands - their name, how long since they last
+                    # wrote, what the bot remembers - so the reply continues the conversation.
+                    bot_config.conversation = build_conversation_context(conversation, history_records, incoming_row.id)
+
                     dynamic_kb = await get_dynamic_kb(tenant, db)
 
                     # Generate Multilingual AI Response (gpt-4o-mini / Local Simulator)
