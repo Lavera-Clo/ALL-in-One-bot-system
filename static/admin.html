@@ -514,16 +514,44 @@
     <!-- ===== MAIN CONTENT ===== -->
     <div class="container">
         <div class="header-title">
-            <h1>Banquet Package &amp; Knowledge Base Manager</h1>
-            <p>Customize Silver, Gold, and Premier package rates and AI knowledge base for your WhatsApp bot.</p>
+            <h1 id="pageHeading">Business &amp; Bot Control Center</h1>
+            <p id="pageSubheading">Manage multi-client WhatsApp bots, credentials, knowledge bases, and operational settings.</p>
         </div>
 
-        <!-- 1. Pricing Matrix -->
-        <div class="card">
-            <div class="card-header">
-                <i class="fa-solid fa-table-cells"></i>
-                <h2>1. Official Banquet Package Rates Matrix (Total LKR)</h2>
+        <!-- ===== BUSINESS SELECTOR & ACTIONS TOOLBAR ===== -->
+        <div class="card" style="padding: 1rem 1.25rem; margin-bottom: 1.5rem; background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(99, 102, 241, 0.3);">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; flex: 1; min-width: 280px;">
+                    <label for="tenantSelect" style="font-weight: 700; font-size: 0.9rem; color: var(--text-main); display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; margin-bottom: 0;">
+                        <i class="fa-solid fa-briefcase" style="color: var(--primary);"></i> Active Business:
+                    </label>
+                    <select id="tenantSelect" class="form-control" style="max-width: 340px; font-weight: 600;" onchange="onTenantChanged(this.value)"></select>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="openNewBusinessModal()" style="padding: 0.55rem 1.1rem; font-size: 0.88rem;">
+                        <i class="fa-solid fa-plus"></i> New Business
+                    </button>
+                    <a id="linkTrain" href="/train" class="btn btn-secondary" style="padding: 0.55rem 1.1rem; font-size: 0.88rem; text-decoration: none;">
+                        <i class="fa-solid fa-graduation-cap"></i> Train Bot
+                    </a>
+                    <a id="linkOrders" href="/orders" class="btn btn-secondary" style="padding: 0.55rem 1.1rem; font-size: 0.88rem; text-decoration: none;">
+                        <i class="fa-solid fa-boxes-stacked"></i> Orders
+                    </a>
+                    <button class="btn" id="btnDeleteTenant" onclick="deleteCurrentTenant()" style="display: none; padding: 0.55rem 0.9rem; font-size: 0.88rem; background: rgba(239,68,68,0.15); color: var(--danger); border: 1px solid rgba(239,68,68,0.3);" title="Delete current business">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </div>
             </div>
+        </div>
+
+        <!-- Banquet Pricing & Package Calculator (Shown for Wasala / Banquet businesses) -->
+        <div id="banquetSection" style="display: none;">
+            <!-- 1. Pricing Matrix -->
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-table-cells"></i>
+                    <h2>1. Official Banquet Package Rates Matrix (Total LKR)</h2>
+                </div>
             <div class="table-responsive">
                 <table class="pricing-table">
                     <thead>
@@ -617,6 +645,7 @@
                     <input type="text" id="perhead_200_plus" class="form-control" value="Silver: Rs. 3,395.00 | Gold: Rs. 3,895.00" onchange="autoGenerateKnowledgeBase()">
                 </div>
             </div>
+        </div>
         </div>
 
         <!-- 3. WhatsApp API Credentials -->
@@ -734,6 +763,74 @@
         </div>
     </div>
 
+    <!-- ===== MODAL: REGISTER NEW BUSINESS ===== -->
+    <div id="newBusinessModal" class="login-overlay" style="display: none;">
+        <div class="login-card" style="max-width: 620px; width: 100%; max-height: 90vh; overflow-y: auto;">
+            <div class="login-brand" style="text-align: left; margin-bottom: 1.25rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2 style="font-size: 1.35rem; display: flex; align-items: center; gap: 0.6rem; color: var(--text-main);">
+                        <i class="fa-solid fa-building-circle-plus" style="font-size: 1.4rem; color: var(--primary); margin: 0;"></i>
+                        Register New Business
+                    </h2>
+                    <button type="button" onclick="closeNewBusinessModal()" style="background: none; border: none; color: var(--text-muted); font-size: 1.35rem; cursor: pointer; padding: 0.25rem;">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <p style="margin-top: 0.35rem; font-size: 0.85rem; color: var(--text-muted);">
+                    Create a new client bot on the platform. No code changes required.
+                </p>
+            </div>
+
+            <form id="newBusinessForm" onsubmit="handleCreateBusiness(event)">
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label class="login-label">Business Name *</label>
+                    <input type="text" id="newBizName" class="form-control" required placeholder="e.g. Kandy Spice Restaurant or Colombo Fashion Hub">
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 1rem;">
+                    <div class="form-group">
+                        <label class="login-label">WhatsApp Phone Number ID *</label>
+                        <input type="text" id="newBizPhoneId" class="form-control" required placeholder="From Meta App Dashboard">
+                    </div>
+                    <div class="form-group">
+                        <label class="login-label">Meta Access Token *</label>
+                        <input type="password" id="newBizToken" class="form-control" required placeholder="Permanent System User Token (EAA...)">
+                    </div>
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 1rem;">
+                    <div class="form-group">
+                        <label class="login-label">Manager Handoff WhatsApp #</label>
+                        <input type="text" id="newBizHandoff" class="form-control" placeholder="+94771234567">
+                    </div>
+                    <div class="form-group">
+                        <label class="login-label">Front Office / Hotline #</label>
+                        <input type="text" id="newBizHotline" class="form-control" placeholder="+94112345678">
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label class="login-label">AI System Prompt / Persona</label>
+                    <input type="text" id="newBizPrompt" class="form-control" placeholder="You are a helpful customer support assistant for [Business Name]. Respond politely in English, Sinhala, or Singlish.">
+                </div>
+
+                <div class="form-group" style="margin-bottom: 1.25rem;">
+                    <label class="login-label">Initial Knowledge Base / Notes</label>
+                    <textarea id="newBizKB" class="form-control" style="min-height: 100px;" placeholder="Business hours, location, delivery options, refund policy, main products or services..."></textarea>
+                </div>
+
+                <div id="newBizError" class="login-error" style="display: none; margin-bottom: 1rem; text-align: left;"></div>
+
+                <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+                    <button type="button" class="btn btn-secondary" onclick="closeNewBusinessModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="btnSubmitNewBiz">
+                        <i class="fa-solid fa-plus"></i> Create Business
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div id="toast" class="toast">
         <i class="fa-solid fa-circle-check"></i>
@@ -741,7 +838,14 @@
     </div>
 
     <script>
-        const API_URL = '/api/tenants/1';
+        let currentTenantId = null;
+        let tenantsCache = [];
+
+        function escapeHtml(str) {
+            return (str || '').replace(/[&<>"']/g, m => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+            }[m]));
+        }
 
         // ===== AUTH =====
         function getToken() { return sessionStorage.getItem('adminToken'); }
@@ -791,8 +895,13 @@
         function afterLogin() {
             document.getElementById('loggedInAs').textContent = `${sessionStorage.getItem('adminUsername')} (${getRole()})`;
             document.getElementById('staffCard').style.display = getRole() === 'owner' ? 'block' : 'none';
-            loadTenantData();
+            loadTenants();
             if (getRole() === 'owner') loadStaffAccounts();
+
+            const action = new URLSearchParams(window.location.search).get('action');
+            if (action === 'new_business' || action === 'new') {
+                openNewBusinessModal();
+            }
         }
 
         function showLoginOverlay(message) {
@@ -815,6 +924,156 @@
             document.getElementById('loginUsername').focus();
         }
 
+        // ===== TENANTS LIST & SELECTION =====
+        async function loadTenants(preferredId) {
+            try {
+                const res = await authFetch('/api/tenants');
+                if (!res.ok) return;
+                tenantsCache = await res.json();
+                const select = document.getElementById('tenantSelect');
+
+                if (!tenantsCache.length) {
+                    select.innerHTML = '<option value="">(No businesses registered)</option>';
+                    openNewBusinessModal();
+                    return;
+                }
+
+                select.innerHTML = tenantsCache.map(t =>
+                    `<option value="${t.id}">${escapeHtml(t.business_name)} (ID: ${t.id})</option>`
+                ).join('');
+
+                const urlParam = Number(new URLSearchParams(window.location.search).get('tenant_id'));
+                if (preferredId && tenantsCache.some(t => t.id === preferredId)) {
+                    currentTenantId = preferredId;
+                } else if (urlParam && tenantsCache.some(t => t.id === urlParam)) {
+                    currentTenantId = urlParam;
+                } else if (!currentTenantId || !tenantsCache.some(t => t.id === currentTenantId)) {
+                    currentTenantId = tenantsCache[0].id;
+                }
+                select.value = currentTenantId;
+
+                // Sync URL and quick-links
+                const url = new URL(window.location);
+                url.searchParams.set('tenant_id', currentTenantId);
+                url.searchParams.delete('action');
+                window.history.replaceState({}, '', url);
+
+                document.getElementById('linkTrain').href = `/train?tenant_id=${currentTenantId}`;
+                document.getElementById('linkOrders').href = `/orders?tenant_id=${currentTenantId}`;
+
+                const canDelete = getRole() === 'owner' && tenantsCache.length > 1;
+                document.getElementById('btnDeleteTenant').style.display = canDelete ? 'inline-flex' : 'none';
+
+                await loadTenantData(currentTenantId);
+            } catch (err) {
+                console.error('Failed to load businesses:', err);
+            }
+        }
+
+        async function onTenantChanged(newId) {
+            currentTenantId = Number(newId);
+            const url = new URL(window.location);
+            url.searchParams.set('tenant_id', currentTenantId);
+            window.history.replaceState({}, '', url);
+
+            document.getElementById('linkTrain').href = `/train?tenant_id=${currentTenantId}`;
+            document.getElementById('linkOrders').href = `/orders?tenant_id=${currentTenantId}`;
+            await loadTenantData(currentTenantId);
+        }
+
+        // ===== MODAL CONTROLS =====
+        function openNewBusinessModal() {
+            document.getElementById('newBusinessForm').reset();
+            document.getElementById('newBizError').style.display = 'none';
+            document.getElementById('newBusinessModal').style.display = 'flex';
+            setTimeout(() => document.getElementById('newBizName').focus(), 50);
+        }
+
+        function closeNewBusinessModal() {
+            document.getElementById('newBusinessModal').style.display = 'none';
+        }
+
+        async function handleCreateBusiness(event) {
+            event.preventDefault();
+            const errEl = document.getElementById('newBizError');
+            errEl.style.display = 'none';
+
+            const name = document.getElementById('newBizName').value.trim();
+            const phoneId = document.getElementById('newBizPhoneId').value.trim();
+            const token = document.getElementById('newBizToken').value.trim();
+            const handoff = document.getElementById('newBizHandoff').value.trim() || null;
+            const hotline = document.getElementById('newBizHotline').value.trim() || null;
+            const prompt = document.getElementById('newBizPrompt').value.trim() ||
+                `You are a helpful customer support assistant for ${name}. Respond politely in English, Sinhala, or Singlish.`;
+            const kb = document.getElementById('newBizKB').value.trim() ||
+                `Welcome to ${name}. We are here to help you.`;
+
+            if (!name || !phoneId || !token) {
+                errEl.textContent = 'Please enter Business Name, WhatsApp Phone Number ID, and Meta Access Token.';
+                errEl.style.display = 'block';
+                return;
+            }
+
+            const btn = document.getElementById('btnSubmitNewBiz');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating...';
+
+            try {
+                const res = await authFetch('/api/tenants', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        business_name: name,
+                        whatsapp_phone_number_id: phoneId,
+                        meta_access_token: token,
+                        system_prompt: prompt,
+                        knowledge_base: kb,
+                        human_handoff_number: handoff,
+                        front_office_number: hotline
+                    })
+                });
+
+                if (res.status === 201) {
+                    const newTenant = await res.json();
+                    closeNewBusinessModal();
+                    document.getElementById('newBusinessForm').reset();
+                    showToast(`✅ Business "${name}" created successfully!`);
+                    await loadTenants(newTenant.id);
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    errEl.textContent = '❌ ' + (err.detail || 'Failed to create business.');
+                    errEl.style.display = 'block';
+                }
+            } catch (err) {
+                errEl.textContent = '❌ Server error creating business.';
+                errEl.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-plus"></i> Create Business';
+            }
+        }
+
+        async function deleteCurrentTenant() {
+            if (!currentTenantId) return;
+            const current = tenantsCache.find(t => t.id === currentTenantId);
+            const name = current ? current.business_name : `Business ID ${currentTenantId}`;
+            if (!confirm(`Are you sure you want to delete "${name}"? This will permanently remove its bot settings, documents, products, and chat records.`)) return;
+
+            try {
+                const res = await authFetch(`/api/tenants/${currentTenantId}`, { method: 'DELETE' });
+                if (res.status === 204) {
+                    showToast(`Business "${name}" deleted.`);
+                    currentTenantId = null;
+                    await loadTenants();
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast('❌ ' + (err.detail || 'Failed to delete business.'));
+                }
+            } catch {
+                showToast('❌ Server error deleting business.');
+            }
+        }
+
         // ===== STAFF ACCOUNTS (owner only) =====
         async function loadStaffAccounts() {
             try {
@@ -824,13 +1083,13 @@
                 const me = sessionStorage.getItem('adminUsername');
                 document.getElementById('staffBody').innerHTML = users.map(u => `
                     <tr>
-                        <td style="text-align:left;">${u.username}${u.username === me ? ' <span style="color:var(--text-muted);font-size:0.75rem;">(you)</span>' : ''}</td>
+                        <td style="text-align:left;">${escapeHtml(u.username)}${u.username === me ? ' <span style="color:var(--text-muted);font-size:0.75rem;">(you)</span>' : ''}</td>
                         <td><span class="menu-badge ${u.role === 'owner' ? 'gold-badge' : 'silver-badge'}">${u.role}</span></td>
                         <td>${u.is_active ? '<span style="color:var(--accent);">Active</span>' : '<span style="color:var(--danger);">Disabled</span>'}</td>
                         <td style="font-size:0.75rem;color:var(--text-muted);">${u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never'}</td>
                         <td>
                             <button class="btn btn-secondary" style="padding:0.35rem 0.7rem;font-size:0.78rem;" onclick="toggleStaffActive(${u.id}, ${!u.is_active})">${u.is_active ? 'Disable' : 'Enable'}</button>
-                            ${u.username !== me ? `<button class="btn" style="padding:0.35rem 0.7rem;font-size:0.78rem;background:rgba(239,68,68,0.15);color:var(--danger);" onclick="deleteStaffAccount(${u.id}, '${u.username}')"><i class="fa-solid fa-trash"></i></button>` : ''}
+                            ${u.username !== me ? `<button class="btn" style="padding:0.35rem 0.7rem;font-size:0.78rem;background:rgba(239,68,68,0.15);color:var(--danger);" onclick="deleteStaffAccount(${u.id}, '${escapeHtml(u.username)}')"><i class="fa-solid fa-trash"></i></button>` : ''}
                         </td>
                     </tr>
                 `).join('');
@@ -884,9 +1143,12 @@
             } catch { showToast('❌ Error deleting account'); }
         }
 
-        // ===== KNOWLEDGE BASE AUTO-GENERATE =====
+        // ===== KNOWLEDGE BASE AUTO-GENERATE (for banquet/events businesses) =====
         function autoGenerateKnowledgeBase() {
-            const v = id => document.getElementById(id).value;
+            const v = id => {
+                const el = document.getElementById(id);
+                return el ? el.value : '';
+            };
             const kb = `=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
 
 🏛️ BANQUET HALLS AVAILABLE:
@@ -943,9 +1205,11 @@ PREMIER MENU PACKAGES:
         }
 
         // ===== LOAD TENANT DATA =====
-        async function loadTenantData() {
+        async function loadTenantData(tenantId) {
+            const id = tenantId || currentTenantId;
+            if (!id) return;
             try {
-                const res = await authFetch(API_URL);
+                const res = await authFetch(`/api/tenants/${id}`);
                 if (res.ok) {
                     const data = await res.json();
                     document.getElementById('businessName').value  = data.business_name || '';
@@ -955,21 +1219,32 @@ PREMIER MENU PACKAGES:
                     document.getElementById('metaAccessToken').placeholder = data.has_access_token ? 'Token saved. Leave blank to keep it.' : 'EAA... (no token saved yet)';
                     document.getElementById('handoffNumber').value = data.human_handoff_number || '';
                     document.getElementById('frontOfficeNumber').value = data.front_office_number || '';
+
+                    const isBanquet = (data.business_name || '').toLowerCase().includes('wasala') ||
+                                      (data.business_name || '').toLowerCase().includes('banquet');
+                    const banquetSec = document.getElementById('banquetSection');
+                    if (banquetSec) banquetSec.style.display = isBanquet ? 'block' : 'none';
+
                     if (data.knowledge_base) {
                         document.getElementById('knowledgeBase').value = data.knowledge_base;
-                    } else {
+                    } else if (isBanquet) {
                         autoGenerateKnowledgeBase();
+                    } else {
+                        document.getElementById('knowledgeBase').value = '';
                     }
-                    showToast('Data loaded successfully!');
+                    showToast('Business details loaded.');
                 }
             } catch (err) {
-                console.error('Failed to load data:', err);
-                autoGenerateKnowledgeBase();
+                console.error('Failed to load business data:', err);
             }
         }
 
         // ===== SAVE TENANT DATA =====
         async function saveTenantData() {
+            if (!currentTenantId) {
+                showToast('❌ No active business selected.');
+                return;
+            }
             const payload = {
                 business_name: document.getElementById('businessName').value,
                 system_prompt: document.getElementById('systemPrompt').value,
@@ -983,12 +1258,19 @@ PREMIER MENU PACKAGES:
             if (accessToken) payload.meta_access_token = accessToken;
 
             try {
-                const res = await authFetch(API_URL, {
+                const res = await authFetch(`/api/tenants/${currentTenantId}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                showToast(res.ok ? '✅ Saved & Synced Live to WhatsApp AI Bot!' : '❌ Failed to save changes.');
+                if (res.ok) {
+                    showToast('✅ Saved & Synced Live to WhatsApp AI Bot!');
+                    const opt = document.querySelector(`#tenantSelect option[value="${currentTenantId}"]`);
+                    if (opt) opt.textContent = `${payload.business_name} (ID: ${currentTenantId})`;
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast('❌ ' + (err.detail || 'Failed to save changes.'));
+                }
             } catch {
                 showToast('❌ Server error saving data.');
             }
@@ -1002,7 +1284,7 @@ PREMIER MENU PACKAGES:
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            // Signed in already (e.g. from another page)? Go straight in; any 401 brings the login back.
+            // Signed in already? Go straight in; any 401 brings the login back.
             if (getToken()) {
                 document.getElementById('loginOverlay').style.display = 'none';
                 afterLogin();
