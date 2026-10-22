@@ -54,7 +54,8 @@ sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 # Not --quiet: installing takes a few minutes on a small server, and silence looks like a hang.
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 # Fail here, loudly, rather than later as a service that restarts forever.
-sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -c "import fastapi, uvicorn, sqlalchemy, greenlet, asyncpg, aiosqlite, openai, av, numpy; print('Python packages OK')"
+# Loads the whole app (every module it imports), so ANY missing package stops the setup here.
+(cd "$APP_DIR" && sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -c "import main; print('Python packages OK')")
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"

@@ -14,3 +14,4 @@ av>=12.0.0          # decodes WhatsApp voice notes to check they contain speech 
 numpy>=1.26
 asyncpg>=0.29         # PostgreSQL driver: the shared database (e.g. Supabase) in production
 greenlet>=3.0         # needed by SQLAlchemy asyncio; no longer installed automatically on Python 3.14
+pypdf>=4.0            # reads PDF documents for training (training_pipeline.py, document_service.py)
