@@ -1,5 +1,6 @@
+import time
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, ForeignKey, Integer, Float, Boolean
+from sqlalchemy import BigInteger, String, Text, DateTime, ForeignKey, Integer, Float, Boolean, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
 
@@ -25,11 +26,30 @@ class Tenant(Base):
     bot_role_title: Mapped[str | None] = mapped_column(String(150), nullable=True)
     business_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    persona_template: Mapped[str | None] = mapped_column(String(50), nullable=True)  # 'hospitality' | 'retail' | 'generic'
+    # Which line of business this is: the key of an IndustryPack in industry_brain.py
+    # ('hospitality', 'restaurant', 'clinic', ...). It picks the bot's persona, default handoff
+    # rules, greeting buttons and safety limits. Every other field here can still override it.
+    industry: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Who chose the industry: 'owner' (never changed automatically) or 'auto' / empty (the
+    # system may refine it as documents are added — see understanding_service.py).
+    industry_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # JSON: what the system worked out about this business from its documents, how sure it is,
+    # the evidence, and which profile fields it filled in. Shown on the portal's setup card.
+    understanding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    persona_template: Mapped[str | None] = mapped_column(String(50), nullable=True)  # optional override; empty = the industry's persona
     handoff_rules: Mapped[str | None] = mapped_column(Text, nullable=True)  # one rule per line, injected into the prompt
     # WhatsApp quick-pick list, one item per line as "Title | Description".
     # Empty means this client simply gets no list menu (instead of another client's halls).
     quick_menu: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The two reply buttons sent with a greeting, one title per line. Empty = the industry's defaults.
+    quick_buttons: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The master switch for automatic replies. Off = every incoming message is saved to the inbox
+    # and nothing is sent automatically; a person replies. Each chat also has its own switch
+    # (Conversation.bot_enabled); the bot answers only when both are on.
+    bot_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # How many days of messages the shared database keeps (sync_service.py cleans up daily).
+    # Contacts and daily message counts are kept regardless.
+    history_days: Mapped[int] = mapped_column(Integer, default=21, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -38,6 +58,8 @@ class Tenant(Base):
     products: Mapped[list["Product"]] = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
     orders: Mapped[list["Order"]] = relationship("Order", back_populates="tenant", cascade="all, delete-orphan")
     documents: Mapped[list["TenantDocument"]] = relationship("TenantDocument", back_populates="tenant", cascade="all, delete-orphan")
+    knowledge_gaps: Mapped[list["KnowledgeGap"]] = relationship("KnowledgeGap", cascade="all, delete-orphan")
+    test_runs: Mapped[list["BotTestRun"]] = relationship("BotTestRun", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Tenant(id={self.id}, business_name='{self.business_name}', phone_id='{self.whatsapp_phone_number_id}')>"
@@ -65,6 +87,8 @@ class TenantDocument(Base):
 
     # 'knowledge' = bot reads it only. 'sendable' = bot sends the file only.
     # 'both'      = bot answers from it AND can send the original PDF.
+    # 'playbook'  = how the owner wants conversations to go (goals, style, objections, example
+    #               chats). Never part of the knowledge base: its numbers are not facts.
     doc_type: Mapped[str] = mapped_column(String(20), default="both", nullable=False)
 
     raw_text: Mapped[str] = mapped_column(Text, default="", nullable=False)   # kept so the KB can be regenerated later
@@ -107,6 +131,20 @@ class ChatHistory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+    # For the live inbox (inbox_service.py). `role` stays what the AI reads ('user' / 'assistant');
+    # `sender` says who actually wrote it: 'customer', 'bot', or 'agent' (a person replying from
+    # the inbox). Rows from before the inbox have no sender: role tells it then.
+    sender: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    message_type: Mapped[str | None] = mapped_column(String(20), nullable=True)   # text, image, audio, document, buttons...
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)         # outgoing: SENT | FAILED
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wa_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # Shared database (sync_service.py): the id a phone or browser gave a message it sent, so an
+    # upload repeated after a dropped connection is saved once; and the change stamp devices
+    # sync by ("everything changed after X").
+    client_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    changed_us: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="chat_histories")
 
     def __repr__(self) -> str:
@@ -131,6 +169,91 @@ class BotQACache(Base):
 
     def __repr__(self) -> str:
         return f"<BotQACache(id={self.id}, tenant_id={self.tenant_id}, question='{self.question[:20]}')>"
+
+
+class Conversation(Base):
+    """
+    One customer's chat with one business, as the live inbox shows it.
+
+    The messages themselves are ChatHistory rows; this holds what belongs to the chat as a
+    whole: the customer's WhatsApp name, whether the bot may answer them, and whether the bot
+    asked for a person.
+    """
+    __tablename__ = "conversations"
+    __table_args__ = (UniqueConstraint("tenant_id", "customer_phone", name="uq_conversation_tenant_phone"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bot_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)   # off = a person handles this chat
+    needs_human: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # the bot handed this customer over
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)   # first contact
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    # The contact, kept after old messages are cleaned up: the name the business gave them
+    # (shown before their WhatsApp name), notes, and how many messages they've exchanged.
+    saved_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    changed_us: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+
+    @property
+    def display_name(self) -> str:
+        return self.saved_name or self.customer_name or ""
+
+    def __repr__(self) -> str:
+        return f"<Conversation(tenant_id={self.tenant_id}, phone='{self.customer_phone}', bot={self.bot_enabled})>"
+
+
+class KnowledgeGap(Base):
+    """
+    A question customers asked that the bot could not answer from the knowledge base.
+
+    This is how the bot learns from real chats WITHOUT learning anything wrong: the gap is
+    shown to the owner, the owner types the right answer once, and that answer joins the
+    knowledge base (see document_service.rebuild_knowledge_base). Nothing the bot said itself
+    is ever reused as a fact. Similar questions are counted on one row, so the owner sees
+    what customers ask most.
+    """
+    __tablename__ = "knowledge_gaps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    bot_reply: Mapped[str | None] = mapped_column(Text, nullable=True)      # what the bot said instead
+    language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    times_asked: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_customer: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="chat", nullable=False)   # 'chat' | 'test' | 'owner'
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False, index=True)  # open | answered | dismissed
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)         # the owner's answer, once given
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<KnowledgeGap(id={self.id}, tenant_id={self.tenant_id}, status='{self.status}', asked={self.times_asked})>"
+
+
+class BotTestRun(Base):
+    """One automatic test of a tenant's bot (self_test_service.py): questions, replies and checks."""
+    __tablename__ = "bot_test_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)   # running | done | failed
+    stage: Mapped[str | None] = mapped_column(Text, nullable=True)        # human-readable progress / error
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)   # questions finished
+    total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)    # 0-100, once done
+    results: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON list, one entry per question
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<BotTestRun(id={self.id}, tenant_id={self.tenant_id}, status='{self.status}', score={self.score})>"
 
 
 class Product(Base):
@@ -227,13 +350,21 @@ class OrderItem(Base):
 
 
 class AdminUser(Base):
-    """A staff/owner account that can log into the admin dashboards."""
+    """
+    An account that can sign in to the portal.
+
+    'owner' / 'staff' run the PLATFORM and can see every business. 'client' is a business
+    owner who signed up themselves: tenant_id is their business, and every page and API call
+    is limited to it (see main.ensure_tenant_access).
+    """
     __tablename__ = "admin_users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    username: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)  # an email for clients
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="staff", nullable=False)  # 'owner' | 'staff'
+    role: Mapped[str] = mapped_column(String(20), default="staff", nullable=False)  # 'owner' | 'staff' | 'client'
+    tenant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -259,3 +390,39 @@ class AdminSession(Base):
     def __repr__(self) -> str:
         return f"<AdminSession(admin_user_id={self.admin_user_id}, expires_at={self.expires_at})>"
 
+
+
+class DailyMessageStat(Base):
+    """
+    Messages per business per day, kept for good. Old messages are deleted after the business's
+    history_days; these counts are what's left of them, so activity charts still go back further.
+    """
+    __tablename__ = "daily_message_stats"
+    __table_args__ = (UniqueConstraint("tenant_id", "day", name="uq_daily_stat_tenant_day"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    day: Mapped[str] = mapped_column(String(10), nullable=False)          # "YYYY-MM-DD" (UTC)
+    incoming: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    outgoing: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+# --- Change stamps for syncing --------------------------------------------------------
+# Every insert or update of a message or a contact gets a fresh, ever-increasing stamp
+# (microseconds). A phone syncs by asking for everything stamped after the last one it saw.
+_last_stamp = 0
+
+
+def next_change_stamp() -> int:
+    global _last_stamp
+    _last_stamp = max(time.time_ns() // 1000, _last_stamp + 1)
+    return _last_stamp
+
+
+def _stamp(mapper, connection, target) -> None:
+    target.changed_us = next_change_stamp()
+
+
+for _model in (ChatHistory, Conversation):
+    event.listen(_model, "before_insert", _stamp)
+    event.listen(_model, "before_update", _stamp)

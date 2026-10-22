@@ -6,9 +6,10 @@ class Settings(BaseSettings):
     META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "my_secure_meta_verify_token_123")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./whatsapp_bot.db")
     META_GRAPH_API_VERSION: str = os.getenv("META_GRAPH_API_VERSION", "v20.0")
-    # App secret from the Meta app dashboard. When set, every webhook call must carry a valid
-    # X-Hub-Signature-256, so nobody but Meta can post fake customer messages.
-    META_APP_SECRET: str = ""
+    # Meta Developer Dashboard -> App settings -> Basic -> App secret. When set, every webhook
+    # POST must carry Meta's X-Hub-Signature-256, so nobody who finds the URL can post fake
+    # customer messages or orders. Set it on any server reachable from the internet.
+    META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
     # WhatsApp access token and phone number ID for the tenant seeded on a brand-new database.
     # Later tenants get theirs from the admin dashboard.
     META_ACCESS_TOKEN: str = ""
@@ -19,6 +20,18 @@ class Settings(BaseSettings):
     # from the admin dashboard's Staff Accounts panel — these env vars are not read again.
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
+
+    # Other websites allowed to call this server from a browser, comma separated, e.g. the
+    # Business Sender site: "https://business-sender.vercel.app,http://localhost:3000".
+    # Empty = only this server's own pages. Never "*": the API carries business data.
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
+
+    # The platform's name, shown on the home page. Change it to your brand.
+    PLATFORM_NAME: str = os.getenv("PLATFORM_NAME", "WhatsApp AI Bot")
+
+    # Self-service sign-up: anyone can create an account and their own business bot from the
+    # portal's login page. Set ALLOW_SIGNUP=false to close sign-ups (existing accounts still work).
+    ALLOW_SIGNUP: bool = os.getenv("ALLOW_SIGNUP", "true").strip().lower() not in ("0", "false", "no")
 
     # Public base URL this server is reachable at (used to build invoice links and
     # Stripe success/cancel redirect URLs). Defaults to localhost for local dev.

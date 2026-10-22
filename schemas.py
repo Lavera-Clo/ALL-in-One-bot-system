@@ -1,6 +1,18 @@
 from datetime import datetime
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
+
+from industry_brain import INDUSTRY_KEYS, normalise_industry
+
+
+def _industry_key(value: Optional[str]) -> Optional[str]:
+    """Accepts a key or a common name ('hotel', 'Real Estate') and stores the key. Empty stays empty."""
+    if value is None or not str(value).strip():
+        return value
+    key = normalise_industry(value)
+    if not key:
+        raise ValueError(f"industry must be one of: {', '.join(INDUSTRY_KEYS)}")
+    return key
 
 # Tenant Schemas
 class TenantBase(BaseModel):
@@ -17,9 +29,11 @@ class TenantBase(BaseModel):
     )
     human_handoff_number: Optional[str] = Field(None, example="+94771234567")
     front_office_number: Optional[str] = Field(None, example="+94342275000")
+    # The line of business; picks the bot's persona, handoff rules, buttons and safety limits.
+    industry: Optional[str] = Field(None, example="restaurant")
 
 class TenantCreate(TenantBase):
-    pass
+    _check_industry = field_validator("industry")(_industry_key)
 
 class TenantUpdate(BaseModel):
     business_name: Optional[str] = None
@@ -30,6 +44,9 @@ class TenantUpdate(BaseModel):
     human_handoff_number: Optional[str] = None
     front_office_number: Optional[str] = None
     bank_details: Optional[str] = None
+    industry: Optional[str] = None
+
+    _check_industry = field_validator("industry")(_industry_key)
 
 class TenantResponse(TenantBase):
     id: int
@@ -205,6 +222,8 @@ class AdminUserResponse(BaseModel):
     username: str
     role: str
     is_active: bool
+    tenant_id: Optional[int] = None      # set for a business owner's ('client') account
+    full_name: Optional[str] = None
     created_at: datetime
     last_login_at: Optional[datetime] = None
 
@@ -224,11 +243,15 @@ class BotProfileUpdate(BaseModel):
     bot_role_title: Optional[str] = Field(None, example="Senior Banquet & Events Consultant")
     business_location: Optional[str] = Field(None, example="Bentota, Sri Lanka")
     currency: Optional[str] = Field(None, example="LKR")
+    industry: Optional[str] = Field(None, example="hospitality")
     persona_template: Optional[str] = Field(None, example="hospitality")
     human_handoff_number: Optional[str] = Field(None, example="+94779998877")
     front_office_number: Optional[str] = Field(None, example="+94342275000")
     handoff_rules: Optional[str] = Field(None, example="Discounts and negotiation\nComplaints and refunds")
     quick_menu: Optional[str] = Field(None, example="Grand Ballroom | 150-650 guests\nGarden Lawn | Outdoor lake view")
+    quick_buttons: Optional[str] = Field(None, example="📊 View Prices\n🍽️ View Menus")
+
+    _check_industry = field_validator("industry")(_industry_key)
 
 
 class TenantDocumentUpdate(BaseModel):
@@ -238,6 +261,83 @@ class TenantDocumentUpdate(BaseModel):
     summary: Optional[str] = None
     doc_type: Optional[str] = Field(None, example="both")
     is_active: Optional[bool] = None
+
+
+class SignupRequest(BaseModel):
+    """A business owner creating their own account and business from the portal."""
+    full_name: Optional[str] = Field(None, example="Nimal Perera")
+    email: str = Field(..., example="nimal@citycare.lk")
+    password: str = Field(..., example="a-long-password")
+    business_name: str = Field(..., example="City Care Medical Centre")
+
+
+class WhatsAppConnectRequest(BaseModel):
+    phone_number_id: str = Field(..., example="109876543210987")
+    access_token: str = Field(..., example="EAA...")
+
+
+# --- Live inbox ---------------------------------------------------------------
+
+class InboxSendRequest(BaseModel):
+    """A reply typed by a person in the inbox."""
+    text: str = Field(..., example="Hi Nimal, yes - we can deliver on Saturday.")
+    # The sending device's own id for this message. Sending again with the same id (after a
+    # dropped connection) returns the first result instead of messaging the customer twice.
+    client_msg_id: Optional[str] = Field(None, max_length=64, example="a1b2c3d4-...")
+
+
+class DeviceMessageRecord(BaseModel):
+    """A message a phone sent by itself (with its own WhatsApp token), saved so every device sees it."""
+    text: str = Field("", max_length=8000)
+    type: str = Field("text", max_length=20, example="image")
+    client_msg_id: str = Field(..., min_length=1, max_length=64)
+    wa_message_id: Optional[str] = Field(None, max_length=128)
+    status: str = Field("SENT", example="SENT")
+    error: Optional[str] = Field(None, max_length=2000)
+    sent_at: Optional[int] = Field(None, description="epoch milliseconds on the device")
+
+
+class ContactUpdate(BaseModel):
+    saved_name: Optional[str] = Field(None, max_length=150, example="Nimal (wholesale)")
+    notes: Optional[str] = Field(None, max_length=5000)
+
+
+class HistorySettings(BaseModel):
+    history_days: int = Field(21, example=21)
+
+
+class ChatBotUpdate(BaseModel):
+    """Switch the bot on or off for one customer's chat."""
+    bot_enabled: bool
+
+
+class BusinessBotUpdate(BaseModel):
+    """The master switch: off = no automatic replies to anyone."""
+    enabled: bool
+
+
+class ManualOrderLine(BaseModel):
+    product_id: int
+    quantity: int = Field(1, ge=1, le=10000)
+
+
+class ManualOrderCreate(BaseModel):
+    """An order entered by hand (a phone call, a walk-in), not through the WhatsApp cart."""
+    customer_phone: Optional[str] = Field(None, example="94771234567")
+    customer_name: Optional[str] = None
+    items: List[ManualOrderLine]
+    status: str = Field("pending_payment", example="pending_payment")
+
+
+class GapAnswerRequest(BaseModel):
+    """The owner's answer to a question the bot couldn't answer. `question` lets them tidy its wording."""
+    answer: str = Field(..., example="Yes, there is free parking for about 80 cars next to the hall.")
+    question: Optional[str] = None
+
+
+class TeachRequest(BaseModel):
+    question: str = Field(..., example="Do you have parking?")
+    answer: str = Field(..., example="Yes, free parking for about 80 cars next to the hall.")
 
 
 class BotPreviewRequest(BaseModel):

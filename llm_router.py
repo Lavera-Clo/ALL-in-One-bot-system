@@ -558,6 +558,22 @@ async def read_pdf(pdf_bytes: bytes, *, exclude_models: Optional[set] = None, ti
 
 async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg", prompt: str = "") -> str:
     """Speech-to-text for WhatsApp voice notes. Groq Whisper first, OpenAI Whisper as backup."""
+    heard = await transcribe_audio_detailed(audio_bytes, filename, prompt)
+    return heard["text"] if heard else ""
+
+
+def _field(obj, name, default=None):
+    return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
+
+
+async def transcribe_audio_detailed(audio_bytes: bytes, filename: str = "voice_note.ogg",
+                                    prompt: str = "") -> Optional[Dict]:
+    """
+    Whisper with its own judgement of the result: the language it heard, how sure it was
+    (average log-probability; near 0 is sure, below about -1 is guessing) and how likely the
+    clip was silence. voice_service.py uses these to decide whether to listen again.
+    Returns None when no Whisper model is configured or all failed.
+    """
     for item in AUDIO_MODELS:
         provider, _, model = item.partition(":")
         for key in configured_keys(provider):
@@ -567,9 +583,19 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg",
                 started = time.time()
                 async with _semaphore(provider):
                     result = await _client(provider, key).audio.transcriptions.create(
-                        model=model, file=(filename, audio_bytes), prompt=prompt or None, timeout=60)
+                        model=model, file=(filename, audio_bytes), prompt=prompt or None,
+                        response_format="verbose_json", temperature=0, timeout=60)
                 _record(provider, model, True, time.time() - started)
-                return (result.text or "").strip()
+                segments = _field(result, "segments") or []
+                logprobs = [float(_field(s, "avg_logprob", 0) or 0) for s in segments]
+                silence = [float(_field(s, "no_speech_prob", 0) or 0) for s in segments]
+                return {
+                    "text": (_field(result, "text", "") or "").strip(),
+                    "language": (_field(result, "language", "") or "").strip().lower(),
+                    "avg_logprob": sum(logprobs) / len(logprobs) if logprobs else None,
+                    "no_speech_prob": max(silence) if silence else None,
+                    "engine": f"{provider}/{model}",
+                }
             except Exception as exc:  # noqa: BLE001
                 scope, pause, reason = _classify(exc)
                 _record(provider, model, False, error=reason)
@@ -577,7 +603,56 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "voice_note.ogg",
                 if scope in ("model", "key"):
                     _trip(f"{provider}/{model}", pause, reason)
                     break
-    return ""
+    return None
+
+
+# Models that understand audio directly (not just transcribe it). Much better than Whisper
+# on Sinhala, Tamil and mixed Singlish, and they can give the meaning in English as well.
+AUDIO_LISTEN_MODELS = ["gemini:gemini-flash-latest", "gemini:gemini-flash-lite-latest"]
+
+
+async def _gemini_listen(model: str, key: str, audio_bytes: bytes, mime: str, prompt: str, timeout: float) -> str:
+    payload = {
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": mime, "data": base64.b64encode(audio_bytes).decode()}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2048, "responseMimeType": "application/json"},
+    }
+    async with _semaphore("gemini"):
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            r = await http.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": key},
+                json=payload,
+            )
+    r.raise_for_status()
+    data = r.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise ValueError(f"no output (blocked: {data.get('promptFeedback', {}).get('blockReason', 'unknown')})")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    if not text.strip():
+        raise ValueError(f"empty answer (finishReason={candidates[0].get('finishReason')})")
+    return text.strip()
+
+
+async def listen_audio(audio_bytes: bytes, mime: str, prompt: str, timeout: float = 45.0) -> Optional[LLMResult]:
+    """Ask an audio-understanding model about a voice note. Its text is whatever `prompt` asks for."""
+    attempts: List[str] = []
+    for item in AUDIO_LISTEN_MODELS:
+        provider, _, model = item.partition(":")
+        result = await _run_candidate(
+            provider, model,
+            lambda key, model=model: _gemini_listen(model, key, audio_bytes, mime, prompt, timeout),
+            attempts, patient=False,
+        )
+        if result:
+            return result
+    if attempts:
+        logger.warning("[llm] no model could listen to the voice note: " + "; ".join(attempts[-4:]))
+    return None
 
 
 # ---------------------------------------------------------------------------

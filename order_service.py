@@ -441,6 +441,77 @@ async def checkout_cart(
     return order, low_stock_products, None
 
 
+MANUAL_ORDER_STATUSES = ("pending_payment", "confirmed", "shipped", "delivered")
+
+
+async def create_manual_order(
+    db: AsyncSession,
+    tenant: Tenant,
+    customer_phone: Optional[str],
+    customer_name: Optional[str],
+    lines: list[tuple[int, int]],
+    status: str = "pending_payment",
+) -> Order:
+    """
+    An order typed in by staff (a phone call, a walk-in) rather than built in the WhatsApp cart.
+    Stock is taken exactly as checkout_cart takes it; nothing is sent to the customer.
+    Raises ValueError with a message fit to show the person entering it.
+    """
+    if status not in MANUAL_ORDER_STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(MANUAL_ORDER_STATUSES)}")
+    if not lines:
+        raise ValueError("Add at least one item.")
+
+    wanted: dict[int, int] = {}
+    for product_id, quantity in lines:
+        if quantity < 1:
+            raise ValueError("Each quantity must be at least 1.")
+        wanted[product_id] = wanted.get(product_id, 0) + quantity
+
+    products = {}
+    for product_id, quantity in wanted.items():
+        product = (await db.execute(select(Product).where(
+            Product.id == product_id, Product.tenant_id == tenant.id, Product.is_active == True))).scalar_one_or_none()  # noqa: E712
+        if product is None:
+            raise ValueError("One of the products no longer exists.")
+        if product.stock_quantity < quantity:
+            raise ValueError(f"Only {product.stock_quantity} of {product.name} in stock.")
+        products[product_id] = product
+
+    total = sum(products[pid].price * qty for pid, qty in wanted.items())
+    names = [products[pid].name for pid in wanted]
+    summary = names[0] if len(names) == 1 else f"{len(names)} items ({', '.join(names[:3])}{'…' if len(names) > 3 else ''})"
+    order = Order(
+        tenant_id=tenant.id,
+        order_number=generate_order_number(),
+        customer_phone="".join(ch for ch in (customer_phone or "") if ch.isdigit()),
+        customer_name=(customer_name or None),
+        product_id=next(iter(wanted)) if len(wanted) == 1 else None,
+        product_name=summary,
+        quantity=sum(wanted.values()),
+        total_amount=total,
+        status=status,
+        confirmed_by="Entered by hand" if status != "pending_payment" else None,
+        confirmed_at=datetime.now(timezone.utc) if status != "pending_payment" else None,
+    )
+    db.add(order)
+    await db.flush()
+    for product_id, quantity in wanted.items():
+        product = products[product_id]
+        db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, quantity=quantity,
+                         unit_price=product.price, subtotal=product.price * quantity))
+        product.stock_quantity = max(0, product.stock_quantity - quantity)
+    await db.commit()
+    await db.refresh(order, attribute_names=["items"])
+
+    try:
+        await ws_manager.broadcast(tenant.id, {"type": "order_created", "order_number": order.order_number,
+                                               "status": order.status, "total_amount": order.total_amount})
+    except Exception as e:
+        logger.error(f"Failed to broadcast new order over WebSocket: {e}")
+    return order
+
+
 # ---------------------------------------------------------------------------
 # ORDER TRACKING & HISTORY
 # ---------------------------------------------------------------------------
@@ -561,3 +632,26 @@ async def mark_cart_reminded(db: AsyncSession, cart_items: list[CartItem]) -> No
     for item in cart_items:
         item.reminded_at = now
     await db.commit()
+
+
+async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
+    """Injects live real-time ERP stock inventory into the AI's knowledge base."""
+    products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)
+    products_res = await db.execute(products_stmt)
+    live_products = products_res.scalars().all()
+
+    # A business that sells no products through the bot (a clinic, a salon, a venue) gets no
+    # inventory block at all. It used to be told "No products currently listed", which the bot
+    # then repeated to customers asking what the business offers.
+    if not live_products:
+        return tenant.knowledge_base or ""
+
+    # Prices are in the tenant's own currency (this printed "$" for every business).
+    currency = f"{tenant.currency} " if tenant.currency else ""
+    inventory_str = "\n\n--- LIVE ERP INVENTORY ---\n"
+    for p in live_products:
+        status = f"{p.stock_quantity} in stock" if p.stock_quantity > 0 else "OUT OF STOCK"
+        inventory_str += f"- {p.name}: {currency}{p.price:,.2f} ({status})\n"
+    inventory_str += "\n[CRITICAL RULE]: When quoting products or prices, ALWAYS refer to the live ERP inventory above. If a customer asks if something is available, strictly check the exact stock here.\n"
+
+    return (tenant.knowledge_base or "") + inventory_str

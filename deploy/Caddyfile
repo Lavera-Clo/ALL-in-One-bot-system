@@ -1,0 +1,11 @@
+# Caddy gets and renews the HTTPS certificate by itself (Let's Encrypt).
+# The domain must already point at this server's public IP (an A record).
+bot.yourdomain.com {
+	encode gzip
+	# Uploaded receipts and training documents can be larger than the default.
+	request_body {
+		max_size 25MB
+	}
+	# Plain proxy; websockets (/ws/...) pass through as well.
+	reverse_proxy 127.0.0.1:8000
+}

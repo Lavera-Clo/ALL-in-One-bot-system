@@ -1,0 +1,34 @@
+# Render Blueprint: deploys the bot server (webhook, API, portal) from this repository.
+# In Render: New + -> Blueprint -> pick this repository. Then fill in the secrets it asks for.
+services:
+  - type: web
+    name: whatsapp-bot
+    runtime: python
+    plan: free                 # see DEPLOY.md: the free plan sleeps when idle; Starter ($7/month) stays awake
+    region: singapore          # closest region to Sri Lanka
+    buildCommand: pip install -r requirements.txt
+    # One worker on purpose: the live inbox and per-customer ordering are kept in memory.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
+    healthCheckPath: /health
+    envVars:
+      # The version the code was tested on.
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: BASE_URL
+        sync: false            # e.g. https://whatsapp-bot.onrender.com (or your own domain)
+      - key: DATABASE_URL
+        sync: false            # the Supabase connection string (postgresql://...)
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false            # required: blocks fake webhook posts
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false            # e.g. https://your-website.vercel.app
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

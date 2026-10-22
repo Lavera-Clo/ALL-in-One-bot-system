@@ -4,14 +4,35 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from config import settings
+from industry_brain import detect_industry, normalise_industry
 
 logger = logging.getLogger("uvicorn.error")
 
-# SQLAlchemy Async Engine
+def database_url(raw: str) -> str:
+    """
+    Accepts the URL as Supabase / Postgres hosts print it ("postgresql://...", "postgres://...")
+    and points it at the async driver. SQLite URLs pass through unchanged.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if raw.startswith(prefix):
+            return "postgresql+asyncpg://" + raw[len(prefix):]
+    return raw
+
+
+DATABASE_URL = database_url(settings.DATABASE_URL)
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+
+# SQLAlchemy Async Engine.
+# PostgreSQL (e.g. Supabase) is the shared database the website, the Android app and the bot
+# all use in production; SQLite stays for local development and the offline tests.
+# statement_cache_size=0 keeps asyncpg working behind Supabase's connection pooler (pgbouncer).
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    DATABASE_URL,
     echo=False,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+    **({"connect_args": {"check_same_thread": False}} if IS_SQLITE else {
+        "pool_pre_ping": True, "pool_size": 5, "max_overflow": 10, "pool_recycle": 1800,
+        "connect_args": {"statement_cache_size": 0},
+    }),
 )
 
 # Async Session Factory
@@ -61,20 +82,90 @@ _COLUMN_MIGRATIONS = [
     ("tenant_documents", "training_report", "TEXT"),
     ("tenant_documents", "extraction_method", "VARCHAR(30)"),
     ("tenant_documents", "public_path", "TEXT"),
+    ("tenants", "industry", "VARCHAR(50)"),
+    ("tenants", "quick_buttons", "TEXT"),
+    ("tenants", "industry_source", "VARCHAR(20)"),
+    ("tenants", "understanding", "TEXT"),
+    ("admin_users", "tenant_id", "INTEGER REFERENCES tenants(id) ON DELETE CASCADE"),
+    ("admin_users", "full_name", "VARCHAR(150)"),
+    ("tenants", "bot_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("chat_history", "sender", "VARCHAR(20)"),
+    ("chat_history", "message_type", "VARCHAR(20)"),
+    ("chat_history", "status", "VARCHAR(20)"),
+    ("chat_history", "error", "TEXT"),
+    ("chat_history", "wa_message_id", "VARCHAR(128)"),
+    ("tenants", "history_days", "INTEGER NOT NULL DEFAULT 21"),
+    ("chat_history", "client_msg_id", "VARCHAR(64)"),
+    ("chat_history", "changed_us", "BIGINT"),
+    ("conversations", "saved_name", "VARCHAR(150)"),
+    ("conversations", "notes", "TEXT"),
+    ("conversations", "message_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("conversations", "changed_us", "BIGINT"),
+]
+
+# Indexes for columns added by migration (create_all only indexes brand-new tables).
+_INDEX_MIGRATIONS = [
+    ("ix_chat_history_changed_us", "chat_history", "changed_us"),
+    ("ix_chat_history_client_msg_id", "chat_history", "client_msg_id"),
+    ("ix_conversations_changed_us", "conversations", "changed_us"),
 ]
 
 
+async def _backfill_tenant_industry(conn) -> None:
+    """
+    Runs once, when tenants.industry is first added. Older rows carried the industry in
+    persona_template ('hospitality', 'retail', 'services'); where that says nothing useful it
+    is read from the business's own name and prompt. Unclear rows stay empty and run generic.
+    """
+    rows = (await conn.execute(text(
+        "SELECT id, business_name, bot_role_title, system_prompt, persona_template FROM tenants"
+    ))).fetchall()
+    for tenant_id, name, role_title, system_prompt, persona in rows:
+        industry = normalise_industry(persona)
+        if industry in ("", "generic"):
+            industry = detect_industry(f"{role_title or ''} {system_prompt or ''}", name or "") or industry
+        if industry:
+            await conn.execute(text("UPDATE tenants SET industry = :industry WHERE id = :id"),
+                               {"industry": industry, "id": tenant_id})
+            logger.info(f"Tenant {tenant_id} ({name}): industry set to '{industry}'.")
+
+
+def _column_sql(column_def: str) -> str:
+    """The migration fragments are written for SQLite; this is their PostgreSQL spelling."""
+    if IS_SQLITE:
+        return column_def
+    out = column_def.replace("DATETIME", "TIMESTAMP")
+    if out.startswith("BOOLEAN"):
+        out = out.replace("DEFAULT 1", "DEFAULT TRUE").replace("DEFAULT 0", "DEFAULT FALSE")
+    return out
+
+
 async def init_db() -> None:
-    """Initialize database tables and apply lightweight column migrations for SQLite."""
+    """Create missing tables and add columns introduced since a database was created (SQLite or PostgreSQL)."""
+    from sqlalchemy import inspect
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        if "sqlite" in settings.DATABASE_URL:
-            for table, column, column_def in _COLUMN_MIGRATIONS:
-                result = await conn.execute(text(f"PRAGMA table_info({table})"))
-                existing_columns = {row[1] for row in result.fetchall()}
-                if column not in existing_columns:
-                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}"))
-                    logger.info(f"Migrated {table} table: added {column} column.")
+        existing = await conn.run_sync(
+            lambda sync_conn: {t: {c["name"] for c in inspect(sync_conn).get_columns(t)}
+                               for t in inspect(sync_conn).get_table_names()})
+        for table, column, column_def in _COLUMN_MIGRATIONS:
+            if table in existing and column not in existing[table]:
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {_column_sql(column_def)}"))
+                existing[table].add(column)
+                logger.info(f"Migrated {table} table: added {column} column.")
+                if (table, column) == ("tenants", "industry"):
+                    await _backfill_tenant_industry(conn)
+                if column == "changed_us":
+                    # Existing rows sync too: stamp them in the order they were written.
+                    await conn.execute(text(f"UPDATE {table} SET changed_us = id"))
+                if (table, column) == ("conversations", "message_count"):
+                    await conn.execute(text(
+                        "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM chat_history h "
+                        "WHERE h.tenant_id = conversations.tenant_id "
+                        "AND h.customer_phone_number = conversations.customer_phone)"))
+        for index, table, column in _INDEX_MIGRATIONS:
+            await conn.execute(text(f"CREATE INDEX IF NOT EXISTS {index} ON {table} ({column})"))
 
-    logger.info("Database initialized successfully.")
+    logger.info(f"Database initialized successfully ({'SQLite' if IS_SQLITE else 'PostgreSQL'}).")

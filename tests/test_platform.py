@@ -51,8 +51,8 @@ def test_webhook_signature_is_enforced_when_app_secret_is_set(client, outbox, mo
     monkeypatch.setattr(settings, "META_APP_SECRET", "app-secret")
     raw = json.dumps(whatsapp_text("hello")).encode()
 
-    assert client.post("/webhook", content=raw).status_code == 403
-    assert client.post("/webhook", content=raw, headers={"X-Hub-Signature-256": "sha256=bad"}).status_code == 403
+    assert client.post("/webhook", content=raw).status_code == 401
+    assert client.post("/webhook", content=raw, headers={"X-Hub-Signature-256": "sha256=bad"}).status_code == 401
     assert outbox == []
 
     signature = "sha256=" + hmac.new(b"app-secret", raw, hashlib.sha256).hexdigest()

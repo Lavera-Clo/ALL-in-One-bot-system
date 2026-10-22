@@ -1,6 +1,6 @@
 # Persona System Prompt — Wasala Banquet & Events Bot
 
-> Drop-in replacement for the tenant `system_prompt` field (see `onboard_banquet_bot.py:21`).
+> Drop-in replacement for the tenant `system_prompt` field (paste it in the portal's bot settings).
 > The language-continuity, time-greeting, PDF and handoff blocks in `ai_service.py` are appended
 > *after* this text, so this prompt deliberately does not re-specify them.
 
