@@ -62,8 +62,8 @@ def test_webhook_signature_is_enforced_when_app_secret_is_set(client, outbox, mo
 
 def test_customer_message_gets_a_reply(client, outbox):
     assert client.post("/webhook", json=whatsapp_text("hello")).status_code == 200
-    first = outbox[0]
-    assert first["kind"] == "text" and first["recipient_phone"] == CUSTOMER
+    first = next(m for m in outbox if m["kind"] == "text")
+    assert first["recipient_phone"] == CUSTOMER
     assert "Wasala Nature Resort" in first["message_text"]
 
 

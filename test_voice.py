@@ -256,7 +256,7 @@ async def test_listening():
 asked_ai = []
 
 
-async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config):
+async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config, **_):
     asked_ai.append(user_message)
     return ai_service.BotReply(f"Answer to: {user_message}")
 

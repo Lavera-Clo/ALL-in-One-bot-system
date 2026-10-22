@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Minutes of cart inactivity before a customer gets one abandoned-cart reminder.
     ABANDONED_CART_MINUTES: int = int(os.getenv("ABANDONED_CART_MINUTES", "30"))
 
+    # Time zone the bot lives in: it is told today's date and the time of day from this, so it
+    # can answer "is it open now?" and plan dates correctly.
+    BUSINESS_TIMEZONE: str = os.getenv("BUSINESS_TIMEZONE", "Asia/Colombo")
+
+    # A customer who sends a voice note gets a voice note back (then the same reply in text).
+    VOICE_REPLIES: bool = os.getenv("VOICE_REPLIES", "true").strip().lower() not in ("0", "false", "no")
+
     # AI providers. Any combination may be set; llm_router.py tries them in order and
     # falls back when one is rate-limited, overloaded or out of quota.
     GEMINI_API_KEY: str = ""

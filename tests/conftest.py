@@ -66,6 +66,8 @@ def outbox(monkeypatch):
             ("send_whatsapp_list_message", "list"),
             ("send_whatsapp_document", "document"),
             ("notify_human_agent", "handoff"),
+            ("send_whatsapp_typing_indicator", "typing"),
+            ("send_whatsapp_voice_note", "voice"),
         ]:
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, recorder(kind))

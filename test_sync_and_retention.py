@@ -44,7 +44,7 @@ def check(condition, label):
     print(f"  ok  {label}")
 
 
-async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config):
+async def scripted_reply(system_prompt, knowledge_base, chat_history, user_message, config, **_):
     return ai_service.BotReply(f"Bot: {user_message}")
 
 
