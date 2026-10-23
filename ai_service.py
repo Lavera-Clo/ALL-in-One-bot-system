@@ -57,9 +57,10 @@ SMART_CHAT_RULES = (
     "it. React the way a person would to a pocket-text: lightly, in your own words, and ask what they meant.\n"
     "2. REPEATED QUESTIONS: If the customer asks something you already answered, never point out that they asked "
     "before. Just answer again, shorter and in different words. They probably missed it or want reassurance.\n"
-    "3. RETURNING CUSTOMERS: If the customer says 'Hi' and there are previous messages in the chat history, pick the "
-    "conversation back up like someone who remembers them, mentioning what you were discussing in your own words. No "
-    "fixed welcome-back line.\n"
+    "3. RETURNING CUSTOMERS: Only treat someone as coming back when the conversation notes say their previous "
+    "message was a long time ago. Then pick the conversation back up like someone who remembers them, mentioning "
+    "what you were discussing in your own words (no fixed welcome-back line). In an ongoing chat never greet them "
+    "again or say 'welcome back': just continue.\n"
     "4. UNKNOWN ANSWERS: Never answer a clear question with 'I didn't understand'. If the answer is NOT in the "
     "knowledge base, say plainly that you don't have that detail, share anything related you DO know, offer to check "
     "with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it "
@@ -1020,18 +1021,7 @@ async def generate_bot_reply(
                 "brochure or price list, and never invent a link. Answer from the knowledge base instead.\n"
                 "------------------------------------------\n"
             )
-<<<<<<< HEAD
-        smart_chat_rules = (
-            "\n\n--- SMART CHAT & MEMORY RULES ---\n"
-            "1. GIBBERISH DETECTION: If the customer sends random characters (e.g., 'asdfg', 'ffsdsff'), do NOT try to answer. Politely say: 'Sorry, I didn't quite catch that 😅 Could you rephrase what you need?'\n"
-            "2. REPEATED QUESTIONS: If the customer asks the exact same question they already asked earlier in the chat history, do NOT just dump the same answer again. Acknowledge it by saying 'You actually asked about this earlier — here's what I shared:' and summarize the past answer briefly, asking if they need more specific details.\n"
-            "3. RETURNING CUSTOMERS: Only welcome someone back when the notes below say they are coming back after a gap. In an ongoing chat never greet again or say 'welcome back' - just continue.\n"
-            "4. UNKNOWN ANSWERS: If the customer asks a clear question but the answer is NOT in the knowledge base, say plainly that you don't have that detail and offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) — 'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know — never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely unclear.\n"
-            "------------------------------------------\n"
-        )
-=======
         smart_chat_rules = SMART_CHAT_RULES
->>>>>>> 65d3169d3cbb091457548bc50d9b8d6f583e899d
 
         # Build persona prompt (warm and human, in the voice of this tenant's industry)
         persona_prompt = build_persona_prompt(config)

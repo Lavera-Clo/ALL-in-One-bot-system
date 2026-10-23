@@ -218,7 +218,7 @@ async def test_refresh_and_webhook():
     print("\nThrough the webhook")
     contexts = []
 
-    async def scripted(system_prompt, knowledge_base, chat_history, user_message, config):
+    async def scripted(system_prompt, knowledge_base, chat_history, user_message, config, **_):
         contexts.append(config.conversation)
         return ai_service.BotReply(f"Reply to {user_message}")
 
