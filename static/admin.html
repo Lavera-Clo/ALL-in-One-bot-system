@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasala Nature Resort - Admin Control Center</title>
+    <title>AI Bot Platform - Admin Control Center</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
@@ -460,9 +460,9 @@
     <div id="loginOverlay" class="login-overlay">
         <div class="login-card">
             <div class="login-brand">
-                <i class="fa-solid fa-hotel"></i>
+                <i class="fa-solid fa-robot"></i>
                 <h2>Admin Portal</h2>
-                <p>Wasala Nature Resort &mdash; Control Center</p>
+                <p>Business &amp; Bot Control Center</p>
             </div>
             <div style="margin-bottom: 1rem;">
                 <label class="login-label">Username</label>
@@ -552,7 +552,7 @@
             </div>
         </div>
 
-        <!-- Banquet Pricing & Package Calculator (Shown for Wasala / Banquet businesses) -->
+        <!-- Banquet Pricing & Package Calculator (Shown for Banquet businesses) -->
         <div id="banquetSection" style="display: none;">
             <!-- 1. Pricing Matrix -->
             <div class="card">
@@ -684,18 +684,18 @@
             <div class="grid-2">
                 <div class="form-group">
                     <label>Bot / Business Name</label>
-                    <input type="text" id="businessName" class="form-control" value="Wasala Nature Resort - Banquet &amp; Events">
+                    <input type="text" id="businessName" class="form-control" placeholder="Business Name">
                 </div>
                 <div class="form-group">
                     <label>WhatsApp Manager Number (Handoff)</label>
-                    <input type="text" id="handoffNumber" class="form-control" value="+94779998877" placeholder="+94 77 999 8877">
+                    <input type="text" id="handoffNumber" class="form-control" placeholder="+94 77 123 4567">
                 </div>
             </div>
 
             <div class="grid-2">
                 <div class="form-group">
                     <label>Front Office / Hotline Number</label>
-                    <input type="text" id="frontOfficeNumber" class="form-control" value="+94342275000" placeholder="+94 34 227 5000">
+                    <input type="text" id="frontOfficeNumber" class="form-control" placeholder="+94 11 234 5678">
                 </div>
                 <div class="form-group" style="display:flex; align-items:flex-end; padding-bottom:0.25rem;">
                     <p style="color:var(--text-muted); font-size:0.82rem; line-height:1.5;">
@@ -708,7 +708,7 @@
             <div class="form-group">
                 <label>AI System Instructions / Persona Prompt</label>
                 <input type="text" id="systemPrompt" class="form-control"
-                    value="You are the senior Banquet &amp; Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices.">
+                    placeholder="You are a professional customer support AI assistant for our business...">
             </div>
 
             <div class="form-group" style="margin-bottom:0;">
@@ -1183,7 +1183,7 @@
                 const el = document.getElementById(id);
                 return el ? el.value : '';
             };
-            const kb = `=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
+            const kb = `=== BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
 
 🏛️ BANQUET HALLS AVAILABLE:
 1. Grand Ballroom (Capacity 150-650 guests)
@@ -1254,8 +1254,7 @@ PREMIER MENU PACKAGES:
                     document.getElementById('handoffNumber').value = data.human_handoff_number || '';
                     document.getElementById('frontOfficeNumber').value = data.front_office_number || '';
 
-                    const isBanquet = (data.business_name || '').toLowerCase().includes('wasala') ||
-                                      (data.business_name || '').toLowerCase().includes('banquet');
+                    const isBanquet = (data.business_name || '').toLowerCase().includes('banquet');
                     const banquetSec = document.getElementById('banquetSection');
                     if (banquetSec) banquetSec.style.display = isBanquet ? 'block' : 'none';
 

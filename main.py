@@ -175,82 +175,78 @@ async def lifespan(app: FastAPI):
     if settings.ADMIN_PASSWORD == "admin123":
         logger.warning("ADMIN_PASSWORD is still the default: set your own in .env before going live.")
 
-    # Seed the first tenant (Wasala Nature Resort) on a brand-new database only. Its WhatsApp
+    # Seed the first starter tenant on a brand-new database only. Its WhatsApp
     # token comes from .env; an existing tenant's token is never touched here.
     async with AsyncSessionLocal() as session:
         tenant_count = (await session.execute(select(func.count(Tenant.id)))).scalar() or 0
         if tenant_count == 0:
-            wasala_tenant = Tenant(
-                business_name="Wasala Nature Resort - Banquet & Events",
+            starter_tenant = Tenant(
+                business_name="Main Store",
                 whatsapp_phone_number_id=settings.SEED_PHONE_NUMBER_ID,
                 meta_access_token=settings.META_ACCESS_TOKEN or "EAA_placeholder_set_META_ACCESS_TOKEN",
                 system_prompt=(
-                    "You are the senior Banquet & Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. "
-                    "Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices."
+                    "You are the professional AI customer support and sales assistant for Main Store. "
+                    "Answer customers warmly, politely, and accurately based on our business knowledge base and product catalog."
                 ),
                 knowledge_base=(
-                    "=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===\n\n"
-                    "🏛️ BANQUET HALLS AVAILABLE:\n"
-                    "1. Grand Ballroom (Capacity 150-650 guests)\n"
-                    "2. Starlight Ballroom (Capacity 100-350 guests)\n\n"
-                    "📊 OFFICIAL BANQUET PACKAGE PRICING MATRIX (TOTAL LKR):\n\n"
-                    "SILVER MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 539,500\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 479,500\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 708,000\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 678,000\n"
-                    "- 200 Pax: Rs. 876,500\n"
-                    "- 250 Pax: Rs. 1,075,000\n"
-                    "- 300 Pax: Rs. 1,273,500\n\n"
-                    "GOLD MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 589,500\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 529,500\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 783,000\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 753,000\n"
-                    "- 200 Pax: Rs. 976,500\n"
-                    "- 250 Pax: Rs. 1,200,000\n"
-                    "- 300 Pax: Rs. 1,423,500\n\n"
-                    "PREMIER MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 709,000\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 649,000\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 917,500\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 887,500\n"
-                    "- 200 Pax: Rs. 1,143,500\n"
-                    "- 250 Pax: Rs. 1,397,500\n"
-                    "- 300 Pax: Rs. 1,647,500\n\n"
-                    "🍽️ EXTRA PLATE RATES (PER EXTRA GUEST):\n"
-                    "- Silver Package Extra Plate: Rs. 4,170.00\n"
-                    "- Gold Package Extra Plate: Rs. 4,770.00\n"
-                    "- Premier Menu Extra Plate: Rs. 5,370.00\n\n"
-                    "👥 PER-HEAD BREAKDOWN RATES:\n"
-                    "1. Starlight Ballroom: Silver Rs. 3,395 | Gold Rs. 3,895 | Premier Rs. 4,795\n"
-                    "2. Grand Ballroom (150-200 Pax): Silver Rs. 3,595 | Gold Rs. 4,095\n"
-                    "3. More Than 200 Pax (All Halls): Silver Rs. 3,395 | Gold Rs. 3,895\n\n"
-                    "📄 OFFICIAL BROCHURE PDF:\n"
-                    "- 2026 Wedding Packages Brochure: https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\n\n"
-                    "📋 POLICIES:\n"
-                    "- Advance Booking Deposit: 25% to hold date. Noise cutoff: 11:30 PM."
+                    "=== MASTER BUSINESS KNOWLEDGE BASE ===\n\n"
+                    "Welcome to our store! We provide high quality products and exceptional customer service.\n\n"
+                    "Browse our product catalog, place orders, or ask any questions about our items, delivery, and pricing.\n\n"
+                    "Business Hours: Monday - Sunday, 8:30 AM - 8:00 PM\n"
+                    "For assistance or custom inquiries, please leave a message."
                 ),
-                human_handoff_number="+94779998877",
-                front_office_number="+94342275000",
-                industry="hospitality"
+                human_handoff_number="",
+                front_office_number="",
+                industry="retail"
             )
-            session.add(wasala_tenant)
+            session.add(starter_tenant)
             await session.commit()
-            logger.info("Successfully auto-seeded Wasala Nature Resort tenant into database!")
+            logger.info("Successfully auto-seeded starter tenant into database!")
 
-        # Bootstrap the first owner admin account, only when no admin users exist yet.
-        admin_count_stmt = select(func.count(AdminUser.id))
-        admin_count = (await session.execute(admin_count_stmt)).scalar() or 0
-        if admin_count == 0:
+        # Ensure the owner admin account exists and credentials match settings
+        owner = (await session.execute(
+            select(AdminUser).where(func.lower(AdminUser.username) == settings.ADMIN_USERNAME.lower())
+        )).scalar_one_or_none()
+
+        if not owner:
             first_owner = AdminUser(
                 username=settings.ADMIN_USERNAME,
-                password_hash=hash_password(settings.ADMIN_PASSWORD),
-                role="owner"
+                password_hash=hash_password(settings.ADMIN_PASSWORD or "admin123"),
+                role="owner",
+                is_active=True
             )
             session.add(first_owner)
             await session.commit()
             logger.info(f"Bootstrapped first owner admin account: '{settings.ADMIN_USERNAME}'")
+        elif os.getenv("FORCE_RESET_ADMIN", "1") == "1":
+            owner.password_hash = hash_password(settings.ADMIN_PASSWORD or "admin123")
+            owner.is_active = True
+            owner.role = "owner"
+            await session.commit()
+            logger.info(f"Synchronized owner account '{owner.username}' credentials.")
+
+        # Auto-migrate legacy tenants away from Wasala branding
+        wasala_rows = (await session.execute(
+            select(Tenant).where(Tenant.business_name.ilike("%wasala%"))
+        )).scalars().all()
+        for t in wasala_rows:
+            t.business_name = "Main Store"
+            t.system_prompt = (
+                "You are the professional AI customer support and sales assistant for Main Store. "
+                "Answer customers warmly, politely, and accurately based on our business knowledge base and product catalog."
+            )
+            t.knowledge_base = (
+                "=== MASTER BUSINESS KNOWLEDGE BASE ===\n\n"
+                "Welcome to our store! We provide high quality products and exceptional customer service.\n\n"
+                "Browse our product catalog, place orders, or ask any questions about our items, delivery, and pricing.\n\n"
+                "Business Hours: Monday - Sunday, 8:30 AM - 8:00 PM\n"
+                "For assistance or custom inquiries, please leave a message."
+            )
+            t.industry = "retail"
+            t.bot_name = "Assistant"
+            logger.info(f"Updated legacy tenant #{t.id} from Wasala to Main Store.")
+        if wasala_rows:
+            await session.commit()
 
     abandoned_cart_task = asyncio.create_task(abandoned_cart_worker())
     history_cleanup_task = asyncio.create_task(history_cleanup_worker())
