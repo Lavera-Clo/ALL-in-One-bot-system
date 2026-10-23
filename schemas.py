@@ -348,6 +348,13 @@ class HistorySettings(BaseModel):
     history_days: int = Field(21, example=21)
 
 
+class BookingUpdate(BaseModel):
+    """Answer a booking request. For 'confirmed' and 'declined' the customer is messaged."""
+    status: str = Field(..., example="confirmed")
+    # Your own words to the customer instead of the standard message.
+    message: Optional[str] = Field(None, max_length=1000)
+
+
 class ChatBotUpdate(BaseModel):
     """Switch the bot on or off for one customer's chat."""
     bot_enabled: bool

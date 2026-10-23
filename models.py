@@ -450,3 +450,29 @@ def _stamp(mapper, connection, target) -> None:
 for _model in (ChatHistory, Conversation):
     event.listen(_model, "before_insert", _stamp)
     event.listen(_model, "before_update", _stamp)
+
+
+class Booking(Base):
+    """
+    A booking or appointment request a customer made in chat (booking_service.py). The bot collects
+    what's needed and records it here as 'pending'; a person confirms or declines it, and the customer
+    is told. The bot never confirms a booking itself.
+    """
+    __tablename__ = "bookings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    service: Mapped[str | None] = mapped_column(String(255), nullable=True)      # what: a table, a dental check-up, a hall
+    when_text: Mapped[str | None] = mapped_column(String(255), nullable=True)    # when, in the customer's words
+    party_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)  # pending|confirmed|declined|cancelled
+    handled_by: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<Booking(id={self.id}, tenant={self.tenant_id}, {self.customer_phone}, {self.status})>"

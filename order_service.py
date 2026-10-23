@@ -634,6 +634,14 @@ async def mark_cart_reminded(db: AsyncSession, cart_items: list[CartItem]) -> No
     await db.commit()
 
 
+async def load_catalog(db: AsyncSession, tenant_id: int) -> list:
+    """The business's active products as order_math.CatalogItem (name, price, stock), for exact totals."""
+    from order_math import CatalogItem
+    rows = (await db.execute(select(Product).where(Product.tenant_id == tenant_id, Product.is_active == True)  # noqa: E712
+                             .order_by(Product.name.asc()))).scalars().all()
+    return [CatalogItem(p.name, float(p.price), int(p.stock_quantity or 0)) for p in rows]
+
+
 async def get_dynamic_kb(tenant: Tenant, db: AsyncSession) -> str:
     """Injects live real-time ERP stock inventory into the AI's knowledge base."""
     products_stmt = select(Product).where(Product.tenant_id == tenant.id, Product.is_active == True)

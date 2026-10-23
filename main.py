@@ -36,7 +36,7 @@ from business_idea_service import generate_business_ideas, create_pdf_from_text
 
 from config import settings
 from database import init_db, get_db, AsyncSessionLocal
-from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun, PasswordResetRequest
+from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun, PasswordResetRequest, Booking
 
 from schemas import (
     TenantCreate,
@@ -67,7 +67,7 @@ from schemas import (
     TeachRequest,
     SignupRequest,
     WhatsAppConnectRequest,
-    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings,
+    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate,
     ChatBotUpdate,
     BusinessBotUpdate,
     ManualOrderCreate,
@@ -122,6 +122,7 @@ from order_service import (
     mark_cart_reminded,
     create_manual_order,
     get_dynamic_kb,
+    load_catalog,
 )
 from auth_service import hash_password, verify_password, generate_session_token, session_expiry, validate_password_strength
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
@@ -136,6 +137,10 @@ from whatsapp_client import add_send_listener
 from sync_service import (
     HISTORY_DAYS_ALLOWED, apply_statuses, cleanup_old_messages, contact_payload, find_by_client_id,
     list_contacts, message_stats, record_device_message, sync_changes, update_contact,
+)
+from booking_service import (
+    capture_later as capture_booking_later, handle_manager_command as handle_booking_command,
+    list_bookings, payload as booking_payload, set_status as set_booking_status, STATUSES as BOOKING_STATUSES,
 )
 from conversation_memory import build_context as build_conversation_context, load_brief as load_conversation_brief
 from voice_service import (
@@ -1785,6 +1790,36 @@ async def message_stats_api(tenant_id: int, days: int = Query(30, ge=1, le=730),
     return {"days": await message_stats(db, tenant_id, days)}
 
 
+# --- Bookings the bot collected from chats (booking_service.py) ---------------------------------
+
+@app.get("/api/tenants/{tenant_id}/bookings", tags=["Bookings"])
+async def bookings_api(tenant_id: int, status_filter: Optional[str] = Query(None, alias="status"),
+                       db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Booking and appointment requests, newest first. `?status=pending` for the ones waiting for an answer."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    if status_filter and status_filter not in BOOKING_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(BOOKING_STATUSES)}")
+    return {"bookings": await list_bookings(db, tenant_id, status_filter)}
+
+
+@app.patch("/api/tenants/{tenant_id}/bookings/{booking_id}", tags=["Bookings"])
+async def update_booking_api(tenant_id: int, booking_id: int, payload: BookingUpdate,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Confirm, decline or cancel a booking. Confirm and decline message the customer (in their language)."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    booking = await db.get(Booking, booking_id)
+    if booking is None or booking.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status != "pending":
+        raise HTTPException(status_code=400, detail=f"This booking is already {booking.status}.")
+    try:
+        sent = await set_booking_status(db, tenant, booking, payload.status, by=admin.full_name or admin.username, message=payload.message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.refresh(booking)
+    return {"booking": booking_payload(booking), "customer_message": sent}
+
+
 @app.post("/api/tenants/{tenant_id}/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, tags=["Orders"])
 async def create_manual_order_api(tenant_id: int, payload: ManualOrderCreate,
                                   db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
@@ -2545,7 +2580,23 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # MANAGER ORDER CONFIRM/REJECT VIA TEXT
                     # -----------------------------------------------------------
                     msg_upper = user_text.strip().upper()
-                    if msg_upper.startswith("CONFIRM ORD-") or msg_upper.startswith("REJECT ORD-"):
+
+                    # Booking requests the bot collected: the manager answers "CONFIRM BK-12" / "DECLINE BK-12".
+                    booking_answer = await handle_booking_command(db, tenant, user_text, customer_phone)
+                    if booking_answer is not None:
+                        await send_whatsapp_message(
+                            phone_number_id=tenant.whatsapp_phone_number_id,
+                            recipient_phone=customer_phone,
+                            message_text=booking_answer,
+                            meta_access_token=tenant.meta_access_token
+                        )
+                        continue
+
+                    # Only the manager's own number may confirm or reject an order. This used to accept the
+                    # command from ANY sender, so a customer who knew their own order number could confirm
+                    # their own payment by texting it.
+                    if (msg_upper.startswith("CONFIRM ORD-") or msg_upper.startswith("REJECT ORD-")) \
+                            and is_manager(tenant, customer_phone):
                         action = "confirmed" if msg_upper.startswith("CONFIRM") else "cancelled"
                         order_num = user_text.strip().split(" ", 1)[1].strip().upper()
                         stmt_ord = select(Order).where(Order.order_number == order_num, Order.tenant_id == tenant.id)
@@ -2833,6 +2884,8 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # Who this is and where the chat stands - their name, how long since they last
                     # wrote, what the bot remembers - so the reply continues the conversation.
                     bot_config.conversation = build_conversation_context(conversation, history_records, incoming_row.id)
+                    # The live product list, so "how much for 3 of these?" is worked out by code, not guessed.
+                    bot_config.catalog = await load_catalog(db, tenant.id)
 
                     dynamic_kb = await get_dynamic_kb(tenant, db)
 
@@ -2885,6 +2938,10 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 )
                         except Exception as voice_err:
                             logger.error(f"Could not reply with a voice note: {voice_err}")
+
+                    # If they are booking something, record it for the team once the details are complete
+                    # (looks at the chat a few seconds from now, after this reply has been saved).
+                    capture_booking_later(tenant.id, customer_phone)
 
                     # Send the reply as separate short messages with a typing-speed pause between them.
                     # Without a real token (local testing) nothing is sent, so nobody needs to wait.

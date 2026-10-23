@@ -26,7 +26,7 @@ def texts(outbox) -> str:
 
 def test_startup_seeds_first_tenant_without_a_real_token(client, auth):
     tenants = client.get("/api/tenants", headers=auth).json()
-    assert [t["business_name"] for t in tenants] == ["Wasala Nature Resort - Banquet & Events"]
+    assert [t["business_name"] for t in tenants] == ["Main Store"]
     assert tenants[0]["has_access_token"] is False
     assert "meta_access_token" not in tenants[0]
 
@@ -64,7 +64,7 @@ def test_customer_message_gets_a_reply(client, outbox):
     assert client.post("/webhook", json=whatsapp_text("hello")).status_code == 200
     first = next(m for m in outbox if m["kind"] == "text")
     assert first["recipient_phone"] == CUSTOMER
-    assert "Wasala Nature Resort" in first["message_text"]
+    assert "Main Store" in first["message_text"]
 
 
 def test_meta_retry_is_answered_once(client, outbox):

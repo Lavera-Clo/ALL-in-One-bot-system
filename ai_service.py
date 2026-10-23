@@ -9,6 +9,8 @@ from config import settings
 from prompts.persona_system_prompt import build_persona_prompt
 import llm_router
 import conversation_memory
+import reply_guards
+import order_math
 from industry_brain import last_topic, playbook_prompt
 from kb_retrieval import select_context, _query_words
 
@@ -97,6 +99,37 @@ GENERAL_KNOWLEDGE_RULES = (
     "   - GENERAL KNOWLEDGE (Helpful): Explaining what a material is, providing styling tips, clarifying how sizes usually work, "
     "answering calendar/time, or polite conversation: answer directly, warmly, and intelligently without refusing or saying you don't know.\n"
     "----------------------------------------------------\n"
+)
+
+# Found by playing realistic customer conversations through the bot (realworld_eval.py).
+REAL_WORLD_RULES = (
+    "--- REAL-WORLD RULES (learned from real customers) ---\n"
+    "1. YOU CAN ONLY SEE THE KNOWLEDGE BASE. You cannot look up orders, bookings, payments, deliveries or stock "
+    "beyond what it says. Never say 'let me look into your order', 'I'll check the price right now' or 'on it'. "
+    "If someone needs a lookup, say a person on the team will check it, and hand over.\n"
+    "2. NEVER DESCRIBE A POLICY OR PROCESS THAT IS NOT WRITTEN DOWN. Refunds, who pays what, how long something "
+    "takes, how a return works, how payment is returned: if the knowledge base doesn't say it, don't say it, not "
+    "even as 'we usually...'. Give what it does say and hand the rest to the team.\n"
+    "3. COMPLAINTS, REFUND DEMANDS, MISSING OR DAMAGED ORDERS, AND ANGRY CUSTOMERS: apologise once, plainly, "
+    "and hand over to a person straight away. Don't interrogate them first, and don't promise a result.\n"
+    "4. BOOKINGS AND ORDERS: you can't confirm a booking or take a payment yourself. Collect what the team "
+    "needs, one thing at a time (never ask again for something already given), and once you have it say the team "
+    "will confirm, and hand over.\n"
+    "5. PRICE HAGGLING: be friendly and honest that the listed price is the price you can quote, and hand "
+    "over to the manager who can decide on anything different. Never agree to a different price.\n"
+    "6. SAFETY: allergies, medicines, symptoms, injuries and anything where a wrong answer could hurt someone: "
+    "never say it is safe or give advice. Share only what the knowledge base says, and hand over to a person.\n"
+    "7. EXACTLY ONE QUESTION at the end, never two. If you need two things, ask the more important one now.\n"
+    "8. SHORT REPLIES LIKE 'ok', 'thanks', 'hmm': answer in a few words. Don't restart the sales pitch or invent "
+    "something you're doing.\n"
+    "9. WRITE IN THEIR LANGUAGE AND SCRIPT. Sinhala script in -> Sinhala script out, never romanised. Singlish in "
+    "-> Singlish out (romanised Sinhala with the odd English word), not plain English.\n"
+    "10. DON'T DO MATHS ON MONEY. Never add up, multiply or estimate a price yourself. If a VERIFIED CALCULATION "
+    "block is given below, use its figures exactly. If there isn't one, quote the unit prices from the knowledge base "
+    "and ask which products and how many, or say the team will confirm the total.\n"
+    "11. DON'T GUESS WHICH PRODUCT. If what they name fits more than one product ('3 tea' when there is green "
+    "and black tea), ask which one, naming the options. Never pick one for them.\n"
+    "------------------------------------------\n"
 )
 
 REASONING_RULES = (
@@ -1081,12 +1114,28 @@ async def generate_bot_reply(
         conversation_ctx = getattr(config, "conversation", None)
         conversation_notes = conversation_memory.context_prompt(conversation_ctx)
 
+        # Totals: when the customer asks "how much altogether?" the CODE adds up the live prices
+        # (order_math.py); the model only reads the verified result out.
+        quote_block = ""
+        quote_text = ""
+        if getattr(config, "catalog", None):
+            try:
+                quote = await order_math.build_quote(chat_history, user_message, config.catalog, config.currency)
+            except Exception as exc:  # noqa: BLE001 - a failed calculation must never stop the reply
+                logger.warning(f"[chat] order total not calculated: {exc}")
+                quote = None
+            if quote:
+                quote_block = order_math.quote_prompt(quote)
+                quote_text = order_math.quote_text(quote)
+                logger.info(f"[chat] verified total: {quote_text.splitlines()[-1]}")
+
         full_system_instructions = (
             f"{persona_prompt}\n\n"
             f"{system_prompt}\n\n"
             f"{industry_playbook}\n\n"
             f"{owner_playbook}"
             f"{conversation_notes}\n"
+            f"{quote_block}"
             f"{conversation_memory.CONTINUITY_RULES}\n"
             f"--- KNOWLEDGE BASE (the parts relevant to this message) ---\n"
             f"{kb_context}\n"
@@ -1098,6 +1147,7 @@ async def generate_bot_reply(
             f"{pdf_instructions}\n"
             f"{time_context_rule()}\n"
             f"{HUMAN_STYLE_RULES}\n"
+            f"{REAL_WORLD_RULES}\n"
             f"{VOICE_NOTE_RULES if from_voice else ''}"
             f"{REASONING_RULES}"
         )
@@ -1108,7 +1158,7 @@ async def generate_bot_reply(
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        model_label, reply_text = await _complete_reply(messages, temperature=0.7)
+        model_label, reply_text = await _complete_reply(messages, temperature=0.5)
         reply_content, is_unknown = _take_unknown_tag(whatsapp_format(reply_text))
 
         # Number guard: every price, count, time or date the bot states must exist in the
@@ -1124,7 +1174,7 @@ async def generate_bot_reply(
         # Standard calendar, sizes (24-48), hours/minutes, standard percentages, common years
         common_general_numbers = "10 12 14 15 16 18 20 22 24 25 26 28 30 32 34 36 38 40 42 44 46 48 50 60 100 2024 2025 2026 2027 2028 24/7"
         allowed_text = "\n".join([knowledge_base or "", system_prompt or "", config.handoff_rules or "",
-                                  user_message, brief_details, time_rule, common_general_numbers] + [m.get("content", "") for m in chat_history])
+                                  user_message, brief_details, time_rule, quote_text, common_general_numbers] + [m.get("content", "") for m in chat_history])
         invented = unsupported_reply_numbers(reply_content, allowed_text, config)
         if invented:
             logger.warning(f"[chat] {model_label} stated numbers not in the knowledge base {invented}; redrafting")
@@ -1148,6 +1198,47 @@ async def generate_bot_reply(
                 return BotReply(safe_unknown_reply(lang, config), handoff=True, unknown=True)
         is_human_handoff = "[HUMAN_HANDOFF_REQUESTED]" in reply_content
         reply_content = reply_content.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
+
+        # Language guard: a customer who wrote Sinhala script or Singlish gets the same back
+        # (measured: Sinhala script was answered in romanised Singlish, Singlish in English).
+        wrong, got = reply_guards.wrong_language(lang, reply_content, user_message)
+        if wrong:
+            logger.warning(f"[chat] customer wrote {lang}, reply was {got}; redrafting in {lang}")
+            how = ("in Sinhala script (අකුරු), never in English letters" if lang == "sinhala"
+                   else "in Singlish: romanised Sinhala with the odd English word, not plain English")
+            fixed = list(messages)
+            fixed[0] = {"role": "system", "content": messages[0]["content"] + (
+                "\n\n--- CORRECTION ---\n"
+                f"Your previous draft was in the wrong language. The customer wrote {lang}. Write the reply again {how}. "
+                "Keep every fact and figure exactly as before.")}
+            try:
+                _, redo_text = await _complete_reply(fixed, temperature=0.4)
+                redo, redo_unknown = _take_unknown_tag(whatsapp_format(redo_text))
+                still_wrong, _ = reply_guards.wrong_language(lang, redo, user_message)
+                if not still_wrong and not unsupported_reply_numbers(redo, allowed_text, config):
+                    is_human_handoff = is_human_handoff or "[HUMAN_HANDOFF_REQUESTED]" in redo
+                    reply_content = redo.replace("[HUMAN_HANDOFF_REQUESTED]", "").strip()
+                    is_unknown = is_unknown or redo_unknown
+            except llm_router.LLMUnavailable:
+                pass
+
+        # Things a person must see whatever the model wrote, and promises nobody would keep:
+        # alert the team (the chat is flagged "Needs you" and the manager is messaged).
+        must_see = reply_guards.needs_person(user_message, getattr(config, "industry", "generic"))
+        promised = reply_guards.promises_followup(reply_content)
+        reply_content = reply_guards.one_question(reply_content)
+        forced = (must_see or promised) and not is_human_handoff
+        if forced:
+            logger.info(f"[chat] handing over to a person: {must_see or 'the reply promised a follow-up'}")
+            is_human_handoff = True
+            # The model didn't hand over itself, so its reply may still be asking the customer
+            # something or offering to check: say what it knows, then that a person will follow up.
+            trimmed = reply_guards.without_questions(reply_content)
+            reply_content = trimmed or reply_content
+        if is_human_handoff:
+            note = reply_guards.handoff_note(lang, reply_content)
+            if note:
+                reply_content = f"{reply_content}\n\n{note}".strip()
         if not is_unknown and not is_human_handoff and _sounds_unsure(reply_content):
             is_unknown = True
         # Update the conversation notes in the background (never delays this reply).
