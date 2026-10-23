@@ -396,6 +396,25 @@ class AdminSession(Base):
         return f"<AdminSession(admin_user_id={self.admin_user_id}, expires_at={self.expires_at})>"
 
 
+class PasswordResetRequest(Base):
+    """
+    A request submitted by a user who forgot their password.
+    Super admin can review, approve (reset password with temporary password) or reject.
+    """
+    __tablename__ = "password_reset_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # 'pending' | 'resolved' | 'rejected'
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    temp_password: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<PasswordResetRequest(id={self.id}, username='{self.username}', status='{self.status}')>"
+
 
 class DailyMessageStat(Base):
     """
