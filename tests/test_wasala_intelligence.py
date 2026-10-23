@@ -172,3 +172,12 @@ def test_voice_replies_can_be_switched_off(client, outbox, monkeypatch):
     client.post("/webhook", json=whatsapp_message({"type": "audio", "audio": {"id": "media2", "mime_type": "audio/ogg"}}))
     assert [m["kind"] for m in outbox if m["kind"] in ("voice", "text")][0] == "text"
     assert not any(m["kind"] == "voice" for m in outbox)
+
+
+def test_general_knowledge_and_calendar_numbers_allowed(chat_models):
+    # Model uses current year and standard garment sizing in general knowledge
+    chat_models("<thinking>General sizing advice</thinking><reply>Size Medium is usually around 38 to 40 inches.</reply>")
+    reply = reply_to("what size is medium usually?")
+    assert "38 to 40" in reply.text
+    assert not reply.unknown
+

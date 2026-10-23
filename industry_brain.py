@@ -45,6 +45,12 @@ _COMMON_TOPICS = {
     "ganan": "prices", "mila": "prices", "kiyada": "prices", "මිල": "prices", "ගණන්": "prices",
     "open": "opening hours", "hours": "opening hours", "close": "opening hours",
     "location": "how to find us", "address": "how to find us", "where": "how to find us",
+    "deliver": "delivery & shipping", "courier": "delivery & shipping", "shipping": "delivery & shipping",
+    "cod": "cash on delivery", "cash on delivery": "cash on delivery",
+    "pay": "payment options", "bank": "payment & bank transfer", "account": "payment & bank transfer",
+    "size": "sizing & measurements", "fit": "sizing & fit", "measurement": "sizing & measurements",
+    "exchange": "returns & exchanges", "return": "returns & exchanges", "refund": "returns & exchanges",
+    "date": "today's schedule & calendar", "today": "today's schedule & calendar",
 }
 
 

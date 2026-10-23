@@ -43,6 +43,13 @@ HUMAN_STYLE_RULES = (
     "Never fake typos.\n"
     "- SMALL TALK: If they are just chatting (how are you, thanks, good night, a joke), answer like a person. Don't "
     "steer every message back to a sale.\n"
+    "- FRUSTRATION & DELAYS: If a customer is worried, annoyed, or complaining (late parcel, wrong size, waiting long), "
+    "acknowledge the frustration immediately with genuine calm empathy. Never give bureaucratic excuses or pass blame to couriers. "
+    "Focus straight on resolving it or offer immediate human manager handoff.\n"
+    "- CELEBRATIONS & GOOD VIBES: If they mention a wedding, birthday, trip, or milestone, share a warm, brief one-beat congratulation "
+    "before jumping to business.\n"
+    "- SMART CLARIFYING: If an inquiry is broad (e.g. 'what items do you have?'), ask ONE helpful question to narrow it down "
+    "instead of dumping a huge menu. Guide them like an attentive, knowledgeable shop assistant.\n"
     "- NUMBERS: Give an exact price once, cleanly. Don't repeat the same figure later in the chat unless they ask.\n"
     "- MESSAGE SHAPE: Write the way people text: one to three short messages. Put a blank line between separate "
     "messages, because each block is delivered as its own WhatsApp bubble. Most replies are one or two bubbles.\n"
@@ -61,15 +68,35 @@ SMART_CHAT_RULES = (
     "message was a long time ago. Then pick the conversation back up like someone who remembers them, mentioning "
     "what you were discussing in your own words (no fixed welcome-back line). In an ongoing chat never greet them "
     "again or say 'welcome back': just continue.\n"
-    "4. UNKNOWN ANSWERS: Never answer a clear question with 'I didn't understand'. If the answer is NOT in the "
-    "knowledge base, say plainly that you don't have that detail, share anything related you DO know, offer to check "
-    "with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply (the customer never sees it; it "
-    "tells the owner what to add). Never guess, estimate or imply an answer (capacity, availability, timing, price) - "
-    "'it might be a squeeze' is a guess too. Yes/no questions about what the business has or offers (a pharmacy, "
-    "parking, a pool, delivery, a service) are facts too: if the knowledge base does not say so, you do not know - "
-    "never answer 'yes' or 'no' from what seems likely. Only ask them to rephrase if their message was genuinely "
-    "unclear, and then ask about the specific thing you are unsure of.\n"
+    "4. UNKNOWN PROPRIETARY FACTS VS GENERAL KNOWLEDGE: Never answer a clear question with 'I didn't understand'.\n"
+    "   - PROPRIETARY FACTS: If the customer asks about THIS BUSINESS'S private details (an exact price, whether a specific item is in stock right now, "
+    "a custom discount, a hall booking confirmation, or private account details) and it is NOT in the knowledge base, say plainly that you do not have "
+    "that detail, offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply. Never guess prices or stock.\n"
+    "   - GENERAL KNOWLEDGE: If the customer asks a general question (about fabrics, sizing, styling advice, how delivery or bank transfers work in general, "
+    "the date/time, local Sri Lankan geography, or friendly small talk), answer warmly and intelligently using your general knowledge, then guide them back to what they need from the business.\n"
     "------------------------------------------\n"
+)
+
+GENERAL_KNOWLEDGE_RULES = (
+    "--- GENERAL KNOWLEDGE & REAL-WORLD COMMON SENSE ---\n"
+    "You possess broad, helpful real-world and local Sri Lankan knowledge. "
+    "Do NOT act like an empty machine that refuses to answer unless a fact is written in the business knowledge base.\n"
+    "1. WHAT YOU CAN FREELY ANSWER FROM GENERAL KNOWLEDGE:\n"
+    "   - Real-world advice & explanations: Fabric types (linen, cotton, silk, denim, rayon/viscose, polyester, durability, breathability in hot Sri Lankan weather, washing/care tips), "
+    "standard garment sizing & measurements (how to measure chest/waist/hips in inches/cm, standard S/M/L/XL sizing concepts), styling tips, color matching.\n"
+    "   - Commerce & Logistics in Sri Lanka: How Cash on Delivery (COD) works, how bank deposit slips or online transfers work, "
+    "general delivery timelines (1-3 business days in Western Province, 3-5 days outstation), courier tracking basics.\n"
+    "   - Local Geography & Context: Sri Lankan cities and towns (Colombo, Kandy, Galle, Gampaha, Kurunegala, Negombo, Jaffna, Matara, etc.), "
+    "general travel routes/distances (e.g., Southern Expressway), climate/monsoon awareness, Poya days, holidays, and cultural norms.\n"
+    "   - Time & Calendar: Today's date, day of the week, upcoming weekends, and time of day (referencing the Real-Time Calendar block).\n"
+    "   - Conversational Etiquette & Small Talk: Responding warmly to 'how are you', 'thank you', 'good morning/night', polite humor, "
+    "compliments, and wishing happy holidays.\n"
+    "2. THE STRICT DISTINCTION:\n"
+    "   - PROPRIETARY BUSINESS FACTS (Strict): Exact product prices, live inventory availability, custom discounts, private bank account "
+    "numbers, and official booking agreements MUST come from the Knowledge Base or Inventory. If missing, say you will confirm with the team.\n"
+    "   - GENERAL KNOWLEDGE (Helpful): Explaining what a material is, providing styling tips, clarifying how sizes usually work, "
+    "answering calendar/time, or polite conversation: answer directly, warmly, and intelligently without refusing or saying you don't know.\n"
+    "----------------------------------------------------\n"
 )
 
 REASONING_RULES = (
@@ -1067,6 +1094,7 @@ async def generate_bot_reply(
             f"{lang_instruction}\n"
             f"{negotiation_handoff_rules}\n"
             f"{smart_chat_rules}\n"
+            f"{GENERAL_KNOWLEDGE_RULES}\n"
             f"{pdf_instructions}\n"
             f"{time_context_rule()}\n"
             f"{HUMAN_STYLE_RULES}\n"
@@ -1091,8 +1119,12 @@ async def generate_bot_reply(
         # Numbers the customer gave earlier (kept in the conversation notes after old messages are
         # cleaned up) may be repeated back to them: "for your 120 guests".
         brief_details = " ".join(str(v) for v in ((getattr(conversation_ctx, "brief", None) or {}).get("details") or {}).values())
+        time_rule = time_context_rule()
+        # Common general knowledge numbers that any assistant may mention:
+        # Standard calendar, sizes (24-48), hours/minutes, standard percentages, common years
+        common_general_numbers = "10 12 14 15 16 18 20 22 24 25 26 28 30 32 34 36 38 40 42 44 46 48 50 60 100 2024 2025 2026 2027 2028 24/7"
         allowed_text = "\n".join([knowledge_base or "", system_prompt or "", config.handoff_rules or "",
-                                  user_message, brief_details] + [m.get("content", "") for m in chat_history])
+                                  user_message, brief_details, time_rule, common_general_numbers] + [m.get("content", "") for m in chat_history])
         invented = unsupported_reply_numbers(reply_content, allowed_text, config)
         if invented:
             logger.warning(f"[chat] {model_label} stated numbers not in the knowledge base {invented}; redrafting")
