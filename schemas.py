@@ -231,6 +231,48 @@ class AdminUserResponse(BaseModel):
         from_attributes = True
 
 
+class SuperAdminAccountCreate(BaseModel):
+    username: str = Field(..., example="manager@example.com")
+    password: str = Field(..., example="SecurePassword123!")
+    role: str = Field(default="staff", example="staff")  # 'owner' | 'staff' | 'client'
+    full_name: Optional[str] = None
+    tenant_id: Optional[int] = None
+
+class SuperAdminAccountUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    tenant_id: Optional[int] = None
+    password: Optional[str] = None
+
+class AdminUserAccountDetail(AdminUserResponse):
+    tenant_name: Optional[str] = None
+
+class ForgotPasswordSubmit(BaseModel):
+    username: str = Field(..., example="user@example.com")
+
+class PasswordResetResolve(BaseModel):
+    new_password: Optional[str] = None
+    notes: Optional[str] = None
+
+class PasswordResetReject(BaseModel):
+    reason: Optional[str] = None
+
+class PasswordResetResponse(BaseModel):
+    id: int
+    username: str
+    status: str
+    requested_at: datetime
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
+    temp_password: Optional[str] = None
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+
 
 # ---------------------------------------------------------------------------
 # BOT PORTAL SCHEMAS — per-tenant identity and document library

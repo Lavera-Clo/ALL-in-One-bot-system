@@ -27,11 +27,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
+import platform
+import shutil
+import secrets
+import string
+
 from business_idea_service import generate_business_ideas, create_pdf_from_text
 
 from config import settings
 from database import init_db, get_db, AsyncSessionLocal
-from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun
+from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun, PasswordResetRequest
 
 from schemas import (
     TenantCreate,
@@ -48,6 +53,13 @@ from schemas import (
     AdminUserCreate,
     AdminUserUpdate,
     AdminUserResponse,
+    SuperAdminAccountCreate,
+    SuperAdminAccountUpdate,
+    AdminUserAccountDetail,
+    ForgotPasswordSubmit,
+    PasswordResetResolve,
+    PasswordResetReject,
+    PasswordResetResponse,
     BotProfileUpdate,
     TenantDocumentUpdate,
     BotPreviewRequest,
@@ -111,7 +123,7 @@ from order_service import (
     create_manual_order,
     get_dynamic_kb,
 )
-from auth_service import hash_password, verify_password, generate_session_token, session_expiry
+from auth_service import hash_password, verify_password, generate_session_token, session_expiry, validate_password_strength
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
 from invoice_service import generate_invoice_pdf
 from realtime import manager as ws_manager, inbox_manager
@@ -133,7 +145,7 @@ from voice_service import (
 
 # Every message sent to a customer is recorded for the live inbox (inbox_service.py).
 add_send_listener(on_whatsapp_sent)
-from rate_limit import RateLimitMiddleware
+from rate_limit import RateLimitMiddleware, SecurityHeadersMiddleware
 from bot_profile_generator import generate_bot_profile
 from bot_learning import get_learning_stats
 
@@ -142,6 +154,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn.error")
 
 ABANDONED_CART_CHECK_INTERVAL_SECONDS = 300
+SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -162,82 +175,78 @@ async def lifespan(app: FastAPI):
     if settings.ADMIN_PASSWORD == "admin123":
         logger.warning("ADMIN_PASSWORD is still the default: set your own in .env before going live.")
 
-    # Seed the first tenant (Wasala Nature Resort) on a brand-new database only. Its WhatsApp
+    # Seed the first starter tenant on a brand-new database only. Its WhatsApp
     # token comes from .env; an existing tenant's token is never touched here.
     async with AsyncSessionLocal() as session:
         tenant_count = (await session.execute(select(func.count(Tenant.id)))).scalar() or 0
         if tenant_count == 0:
-            wasala_tenant = Tenant(
-                business_name="Wasala Nature Resort - Banquet & Events",
+            starter_tenant = Tenant(
+                business_name="Main Store",
                 whatsapp_phone_number_id=settings.SEED_PHONE_NUMBER_ID,
                 meta_access_token=settings.META_ACCESS_TOKEN or "EAA_placeholder_set_META_ACCESS_TOKEN",
                 system_prompt=(
-                    "You are the senior Banquet & Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. "
-                    "Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices."
+                    "You are the professional AI customer support and sales assistant for Main Store. "
+                    "Answer customers warmly, politely, and accurately based on our business knowledge base and product catalog."
                 ),
                 knowledge_base=(
-                    "=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===\n\n"
-                    "🏛️ BANQUET HALLS AVAILABLE:\n"
-                    "1. Grand Ballroom (Capacity 150-650 guests)\n"
-                    "2. Starlight Ballroom (Capacity 100-350 guests)\n\n"
-                    "📊 OFFICIAL BANQUET PACKAGE PRICING MATRIX (TOTAL LKR):\n\n"
-                    "SILVER MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 539,500\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 479,500\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 708,000\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 678,000\n"
-                    "- 200 Pax: Rs. 876,500\n"
-                    "- 250 Pax: Rs. 1,075,000\n"
-                    "- 300 Pax: Rs. 1,273,500\n\n"
-                    "GOLD MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 589,500\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 529,500\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 783,000\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 753,000\n"
-                    "- 200 Pax: Rs. 976,500\n"
-                    "- 250 Pax: Rs. 1,200,000\n"
-                    "- 300 Pax: Rs. 1,423,500\n\n"
-                    "PREMIER MENU PACKAGES:\n"
-                    "- 100 Pax (Grand Ballroom): Rs. 709,000\n"
-                    "- 100 Pax (Starlight Ballroom): Rs. 649,000\n"
-                    "- 150 Pax (Grand Ballroom): Rs. 917,500\n"
-                    "- 150 Pax (Starlight Ballroom): Rs. 887,500\n"
-                    "- 200 Pax: Rs. 1,143,500\n"
-                    "- 250 Pax: Rs. 1,397,500\n"
-                    "- 300 Pax: Rs. 1,647,500\n\n"
-                    "🍽️ EXTRA PLATE RATES (PER EXTRA GUEST):\n"
-                    "- Silver Package Extra Plate: Rs. 4,170.00\n"
-                    "- Gold Package Extra Plate: Rs. 4,770.00\n"
-                    "- Premier Menu Extra Plate: Rs. 5,370.00\n\n"
-                    "👥 PER-HEAD BREAKDOWN RATES:\n"
-                    "1. Starlight Ballroom: Silver Rs. 3,395 | Gold Rs. 3,895 | Premier Rs. 4,795\n"
-                    "2. Grand Ballroom (150-200 Pax): Silver Rs. 3,595 | Gold Rs. 4,095\n"
-                    "3. More Than 200 Pax (All Halls): Silver Rs. 3,395 | Gold Rs. 3,895\n\n"
-                    "📄 OFFICIAL BROCHURE PDF:\n"
-                    "- 2026 Wedding Packages Brochure: https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\n\n"
-                    "📋 POLICIES:\n"
-                    "- Advance Booking Deposit: 25% to hold date. Noise cutoff: 11:30 PM."
+                    "=== MASTER BUSINESS KNOWLEDGE BASE ===\n\n"
+                    "Welcome to our store! We provide high quality products and exceptional customer service.\n\n"
+                    "Browse our product catalog, place orders, or ask any questions about our items, delivery, and pricing.\n\n"
+                    "Business Hours: Monday - Sunday, 8:30 AM - 8:00 PM\n"
+                    "For assistance or custom inquiries, please leave a message."
                 ),
-                human_handoff_number="+94779998877",
-                front_office_number="+94342275000",
-                industry="hospitality"
+                human_handoff_number="",
+                front_office_number="",
+                industry="retail"
             )
-            session.add(wasala_tenant)
+            session.add(starter_tenant)
             await session.commit()
-            logger.info("Successfully auto-seeded Wasala Nature Resort tenant into database!")
+            logger.info("Successfully auto-seeded starter tenant into database!")
 
-        # Bootstrap the first owner admin account, only when no admin users exist yet.
-        admin_count_stmt = select(func.count(AdminUser.id))
-        admin_count = (await session.execute(admin_count_stmt)).scalar() or 0
-        if admin_count == 0:
+        # Ensure the owner admin account exists and credentials match settings
+        owner = (await session.execute(
+            select(AdminUser).where(func.lower(AdminUser.username) == settings.ADMIN_USERNAME.lower())
+        )).scalar_one_or_none()
+
+        if not owner:
             first_owner = AdminUser(
                 username=settings.ADMIN_USERNAME,
-                password_hash=hash_password(settings.ADMIN_PASSWORD),
-                role="owner"
+                password_hash=hash_password(settings.ADMIN_PASSWORD or "admin123"),
+                role="owner",
+                is_active=True
             )
             session.add(first_owner)
             await session.commit()
             logger.info(f"Bootstrapped first owner admin account: '{settings.ADMIN_USERNAME}'")
+        elif os.getenv("FORCE_RESET_ADMIN", "1") == "1":
+            owner.password_hash = hash_password(settings.ADMIN_PASSWORD or "admin123")
+            owner.is_active = True
+            owner.role = "owner"
+            await session.commit()
+            logger.info(f"Synchronized owner account '{owner.username}' credentials.")
+
+        # Auto-migrate legacy tenants away from Wasala branding
+        wasala_rows = (await session.execute(
+            select(Tenant).where(Tenant.business_name.ilike("%wasala%"))
+        )).scalars().all()
+        for t in wasala_rows:
+            t.business_name = "Main Store"
+            t.system_prompt = (
+                "You are the professional AI customer support and sales assistant for Main Store. "
+                "Answer customers warmly, politely, and accurately based on our business knowledge base and product catalog."
+            )
+            t.knowledge_base = (
+                "=== MASTER BUSINESS KNOWLEDGE BASE ===\n\n"
+                "Welcome to our store! We provide high quality products and exceptional customer service.\n\n"
+                "Browse our product catalog, place orders, or ask any questions about our items, delivery, and pricing.\n\n"
+                "Business Hours: Monday - Sunday, 8:30 AM - 8:00 PM\n"
+                "For assistance or custom inquiries, please leave a message."
+            )
+            t.industry = "retail"
+            t.bot_name = "Assistant"
+            logger.info(f"Updated legacy tenant #{t.id} from Wasala to Main Store.")
+        if wasala_rows:
+            await session.commit()
 
     abandoned_cart_task = asyncio.create_task(abandoned_cart_worker())
     history_cleanup_task = asyncio.create_task(history_cleanup_worker())
@@ -359,6 +368,9 @@ MAIN_MENU_RESEND_SECONDS = 30 * 60
 # Mount static folder for serving PDFs, images, and admin interface
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# HTTP Security Headers (defense-in-depth across all responses)
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Rate-limit noisy/abusable public endpoints (per client IP)
 app.add_middleware(RateLimitMiddleware, limits={
     "/webhook": (120, 60),                    # Meta webhook traffic can burst
@@ -366,6 +378,8 @@ app.add_middleware(RateLimitMiddleware, limits={
     "/api/admin/login": (10, 60),             # brute-force protection
     "/api/signup": (5, 600),                  # each sign-up creates a business
     "/api/generate-business-ideas": (5, 300), # each run costs an OpenAI call
+    "/api/auth/forgot-password": (5, 300),    # anti-spam password reset requests
+    "/api/superadmin/accounts": (30, 60),     # account management operations
 })
 
 # Websites on other addresses (such as the Business Sender site) may call the API from a
@@ -646,6 +660,538 @@ async def delete_admin_user(
     await db.delete(target)
     await db.commit()
     return None
+
+
+# ---------------------------------------------------------------------------
+# SUPER ADMIN: SYSTEM STATS, ACCOUNTS & PASSWORD RESET MANAGEMENT
+# ---------------------------------------------------------------------------
+
+def _generate_temporary_password(length: int = 10) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%"
+    pwd = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice("!@#$%"),
+    ]
+    pwd += [secrets.choice(alphabet) for _ in range(max(length - 4, 2))]
+    secrets.SystemRandom().shuffle(pwd)
+    return "".join(pwd)
+
+
+def _get_server_space_and_ram():
+    """Returns disk, RAM, CPU, and host metrics."""
+    try:
+        disk = shutil.disk_usage(os.path.abspath(os.curdir))
+        disk_total_gb = round(disk.total / (1024 ** 3), 2)
+        disk_used_gb = round(disk.used / (1024 ** 3), 2)
+        disk_free_gb = round(disk.free / (1024 ** 3), 2)
+        disk_percent = round((disk.used / disk.total) * 100, 1) if disk.total > 0 else 0.0
+    except Exception:
+        disk_total_gb, disk_used_gb, disk_free_gb, disk_percent = 0.0, 0.0, 0.0, 0.0
+
+    ram_total_gb = 0.0
+    ram_used_gb = 0.0
+    ram_free_gb = 0.0
+    ram_percent = 0.0
+    cpu_percent = 0.0
+    boot_time_iso = None
+    process_ram_mb = 0.0
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        ram_total_gb = round(vm.total / (1024 ** 3), 2)
+        ram_used_gb = round(vm.used / (1024 ** 3), 2)
+        ram_free_gb = round(vm.available / (1024 ** 3), 2)
+        ram_percent = round(vm.percent, 1)
+        cpu_percent = round(psutil.cpu_percent(interval=0.05), 1)
+        boot_time_iso = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc).isoformat()
+        process = psutil.Process()
+        process_ram_mb = round(process.memory_info().rss / (1024 ** 2), 2)
+    except Exception:
+        pass
+
+    db_size_mb = 0.0
+    try:
+        db_file = os.path.join(os.path.abspath(os.curdir), "whatsapp_bot.db")
+        if os.path.exists(db_file):
+            db_size_mb = round(os.path.getsize(db_file) / (1024 ** 2), 2)
+    except Exception:
+        pass
+
+    uptime_secs = int(time.time() - SERVER_START_TIME)
+    days = uptime_secs // 86400
+    hours = (uptime_secs % 86400) // 3600
+    mins = (uptime_secs % 3600) // 60
+    secs = uptime_secs % 60
+    uptime_human = f"{days}d {hours}h {mins}m {secs}s" if days > 0 else f"{hours}h {mins}m {secs}s" if hours > 0 else f"{mins}m {secs}s"
+
+    return {
+        "disk": {
+            "total_gb": disk_total_gb,
+            "used_gb": disk_used_gb,
+            "free_gb": disk_free_gb,
+            "used_percent": disk_percent,
+        },
+        "ram": {
+            "total_gb": ram_total_gb,
+            "used_gb": ram_used_gb,
+            "free_gb": ram_free_gb,
+            "used_percent": ram_percent,
+            "process_rss_mb": process_ram_mb,
+        },
+        "cpu": {
+            "percent": cpu_percent,
+        },
+        "system": {
+            "os": f"{platform.system()} {platform.release()}",
+            "python_version": platform.python_version(),
+            "hostname": platform.node(),
+            "boot_time": boot_time_iso,
+            "db_size_mb": db_size_mb,
+            "uptime_seconds": uptime_secs,
+            "uptime_human": uptime_human,
+        }
+    }
+
+
+@app.get("/api/superadmin/system-stats", tags=["Super Admin"])
+async def superadmin_system_stats(
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin endpoint returning:
+    1. Server space (Disk usage: total, used, free, percent)
+    2. Server RAM usage (total, used, free, percent, process memory)
+    3. CPU & System metadata
+    4. Account creation stats: total accounts, owners, staff, clients, active, inactive, tenants, pending password resets
+    """
+    sys_stats = _get_server_space_and_ram()
+
+    # Accounts metrics
+    users = (await db.execute(select(AdminUser))).scalars().all()
+    total_accounts = len(users)
+    owners_count = sum(1 for u in users if u.role == "owner")
+    staff_count = sum(1 for u in users if u.role == "staff")
+    clients_count = sum(1 for u in users if u.role == "client")
+    active_count = sum(1 for u in users if u.is_active)
+    inactive_count = total_accounts - active_count
+
+    tenants_count = (await db.execute(select(func.count(Tenant.id)))).scalar() or 0
+
+    pending_resets = (await db.execute(
+        select(func.count(PasswordResetRequest.id)).where(PasswordResetRequest.status == "pending")
+    )).scalar() or 0
+    total_resets = (await db.execute(
+        select(func.count(PasswordResetRequest.id))
+    )).scalar() or 0
+
+    # Recent 5 accounts
+    recent_users = sorted(users, key=lambda u: u.created_at, reverse=True)[:5]
+    recent_list = [
+        {
+            "id": u.id,
+            "username": u.username,
+            "role": u.role,
+            "full_name": u.full_name,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in recent_users
+    ]
+
+    return {
+        **sys_stats,
+        "accounts": {
+            "total": total_accounts,
+            "owners": owners_count,
+            "staff": staff_count,
+            "clients": clients_count,
+            "active": active_count,
+            "inactive": inactive_count,
+            "tenants": tenants_count,
+            "recent": recent_list,
+        },
+        "resets": {
+            "pending": pending_resets,
+            "total": total_resets,
+        }
+    }
+
+
+@app.get("/api/superadmin/accounts", tags=["Super Admin"])
+async def superadmin_list_accounts(
+    q: Optional[str] = Query(None, description="Search username or full name"),
+    role: Optional[str] = Query(None, description="Filter by role: owner, staff, client, or all"),
+    status: Optional[str] = Query(None, description="Filter by status: active, inactive, or all"),
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    List all accounts with business name, search, and filtering. Super Admin (owner) only.
+    """
+    tenants = (await db.execute(select(Tenant))).scalars().all()
+    tenant_map = {t.id: t.business_name for t in tenants}
+
+    stmt = select(AdminUser).order_by(AdminUser.created_at.desc())
+    users = (await db.execute(stmt)).scalars().all()
+
+    filtered = []
+    q_clean = (q or "").strip().lower()
+    for u in users:
+        if q_clean:
+            name_match = (u.full_name or "").lower()
+            user_match = u.username.lower()
+            if q_clean not in name_match and q_clean not in user_match:
+                continue
+        if role and role != "all" and u.role != role:
+            continue
+        if status and status != "all":
+            if status == "active" and not u.is_active:
+                continue
+            if status == "inactive" and u.is_active:
+                continue
+
+        filtered.append({
+            "id": u.id,
+            "username": u.username,
+            "full_name": u.full_name,
+            "role": u.role,
+            "is_active": u.is_active,
+            "tenant_id": u.tenant_id,
+            "tenant_name": tenant_map.get(u.tenant_id),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+        })
+
+    return filtered
+
+
+@app.post("/api/superadmin/accounts", tags=["Super Admin"], status_code=status.HTTP_201_CREATED)
+async def superadmin_create_account(
+    user_in: SuperAdminAccountCreate,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin create any account (owner, staff, client) with password and optional tenant.
+    """
+    if user_in.role not in ("owner", "staff", "client"):
+        raise HTTPException(status_code=400, detail="Role must be 'owner', 'staff', or 'client'")
+
+    username = user_in.username.strip().lower()
+    existing = (await db.execute(select(AdminUser).where(func.lower(AdminUser.username) == username))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Username '{user_in.username}' is already in use")
+
+    valid, err_msg = validate_password_strength(user_in.password, user_in.username)
+    if not valid:
+        raise HTTPException(status_code=400, detail=err_msg)
+
+    new_user = AdminUser(
+        username=user_in.username.strip(),
+        password_hash=hash_password(user_in.password),
+        role=user_in.role,
+        full_name=user_in.full_name.strip() if user_in.full_name else None,
+        tenant_id=user_in.tenant_id if user_in.tenant_id and user_in.tenant_id > 0 else None,
+        is_active=True,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return {
+        "id": new_user.id,
+        "username": new_user.username,
+        "full_name": new_user.full_name,
+        "role": new_user.role,
+        "is_active": new_user.is_active,
+        "tenant_id": new_user.tenant_id,
+        "created_at": new_user.created_at.isoformat() if new_user.created_at else None,
+    }
+
+
+@app.put("/api/superadmin/accounts/{user_id}", tags=["Super Admin"])
+async def superadmin_update_account(
+    user_id: int,
+    update_data: SuperAdminAccountUpdate,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin update account details, status, role, tenant, or password.
+    """
+    target = (await db.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if update_data.is_active is False and target.id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own Super Admin account")
+
+    if update_data.role is not None:
+        if update_data.role not in ("owner", "staff", "client"):
+            raise HTTPException(status_code=400, detail="Role must be 'owner', 'staff', or 'client'")
+        if update_data.role != "owner" and target.role == "owner":
+            owner_count = (await db.execute(select(func.count(AdminUser.id)).where(AdminUser.role == "owner", AdminUser.is_active == True))).scalar() or 0
+            if owner_count <= 1:
+                raise HTTPException(status_code=400, detail="Cannot demote the last remaining owner")
+        target.role = update_data.role
+
+    if update_data.full_name is not None:
+        target.full_name = update_data.full_name.strip() if update_data.full_name else None
+
+    if update_data.is_active is not None:
+        target.is_active = update_data.is_active
+
+    if update_data.tenant_id is not None:
+        target.tenant_id = update_data.tenant_id if update_data.tenant_id > 0 else None
+
+    if update_data.password:
+        valid, err_msg = validate_password_strength(update_data.password, target.username)
+        if not valid:
+            raise HTTPException(status_code=400, detail=err_msg)
+        target.password_hash = hash_password(update_data.password)
+
+    await db.commit()
+    await db.refresh(target)
+    return {
+        "id": target.id,
+        "username": target.username,
+        "full_name": target.full_name,
+        "role": target.role,
+        "is_active": target.is_active,
+        "tenant_id": target.tenant_id,
+    }
+
+
+@app.delete("/api/superadmin/accounts/{user_id}", tags=["Super Admin"], status_code=status.HTTP_204_NO_CONTENT)
+async def superadmin_delete_account(
+    user_id: int,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin delete account. Cannot delete self or last remaining owner.
+    """
+    target = (await db.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if target.id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own Super Admin account")
+
+    if target.role == "owner":
+        owner_count = (await db.execute(select(func.count(AdminUser.id)).where(AdminUser.role == "owner", AdminUser.is_active == True))).scalar() or 0
+        if owner_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last remaining owner")
+
+    await db.delete(target)
+    await db.commit()
+    return None
+
+
+@app.post("/api/superadmin/accounts/{user_id}/reset-password", tags=["Super Admin"])
+async def superadmin_direct_reset_password(
+    user_id: int,
+    payload: Optional[dict] = None,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin resets any account's password directly.
+    Generates a secure temporary password if none provided.
+    """
+    target = (await db.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    provided = (payload or {}).get("password") if isinstance(payload, dict) else None
+    if provided and provided.strip():
+        valid, err_msg = validate_password_strength(provided.strip(), target.username)
+        if not valid:
+            raise HTTPException(status_code=400, detail=err_msg)
+        new_pwd = provided.strip()
+    else:
+        new_pwd = _generate_temporary_password(10)
+
+    target.password_hash = hash_password(new_pwd)
+
+    from sqlalchemy import delete
+    await db.execute(delete(AdminSession).where(AdminSession.admin_user_id == target.id))
+
+    await db.commit()
+    return {
+        "ok": True,
+        "user_id": target.id,
+        "username": target.username,
+        "new_password": new_pwd,
+        "message": f"Password for '{target.username}' has been successfully reset."
+    }
+
+
+# ---------------------------------------------------------------------------
+# FORGOT PASSWORD & RESET REQUESTS
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/forgot-password", tags=["Admin Auth"])
+async def submit_forgot_password(
+    req: ForgotPasswordSubmit,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Public endpoint: User submits username/email requesting password reset.
+    Creates a pending PasswordResetRequest for Super Admin to review and resolve.
+    """
+    clean_username = req.username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Please enter your username or email")
+
+    user = (await db.execute(
+        select(AdminUser).where(func.lower(AdminUser.username) == clean_username.lower())
+    )).scalar_one_or_none()
+
+    if user:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+        recent_req = (await db.execute(
+            select(PasswordResetRequest).where(
+                PasswordResetRequest.username == user.username,
+                PasswordResetRequest.status == "pending",
+                PasswordResetRequest.requested_at >= cutoff
+            )
+        )).scalars().first()
+
+        if not recent_req:
+            reset_req = PasswordResetRequest(
+                username=user.username,
+                status="pending",
+                requested_at=datetime.now(timezone.utc),
+                notes="User requested password reset via login portal."
+            )
+            db.add(reset_req)
+            await db.commit()
+
+    return {
+        "ok": True,
+        "message": "Password reset request submitted. Your Super Administrator will review and reset your credentials."
+    }
+
+
+@app.get("/api/superadmin/password-resets", tags=["Super Admin"])
+async def superadmin_list_password_resets(
+    status: Optional[str] = Query("all", description="Status filter: pending, resolved, rejected, all"),
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin view all forgot password requests.
+    """
+    stmt = select(PasswordResetRequest).order_by(PasswordResetRequest.requested_at.desc())
+    if status and status != "all":
+        stmt = stmt.where(PasswordResetRequest.status == status)
+
+    requests = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "username": r.username,
+            "status": r.status,
+            "requested_at": r.requested_at.isoformat() if r.requested_at else None,
+            "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+            "resolved_by": r.resolved_by,
+            "temp_password": r.temp_password,
+            "notes": r.notes,
+        }
+        for r in requests
+    ]
+
+
+@app.post("/api/superadmin/password-resets/{request_id}/resolve", tags=["Super Admin"])
+async def superadmin_resolve_password_reset(
+    request_id: int,
+    payload: Optional[PasswordResetResolve] = None,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin resolves a forgot-password request by resetting the user's password.
+    Returns the newly generated temporary password to give to the user.
+    """
+    req = (await db.execute(select(PasswordResetRequest).where(PasswordResetRequest.id == request_id))).scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Password reset request not found")
+
+    user = (await db.execute(
+        select(AdminUser).where(func.lower(AdminUser.username) == req.username.lower())
+    )).scalar_one_or_none()
+
+    if not user:
+        req.status = "rejected"
+        req.notes = "Account no longer exists."
+        req.resolved_by = admin.username
+        req.resolved_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(status_code=404, detail=f"No account found with username '{req.username}'")
+
+    if payload and payload.new_password and len(payload.new_password.strip()) >= 6:
+        new_pwd = payload.new_password.strip()
+    else:
+        new_pwd = _generate_temporary_password(10)
+
+    user.password_hash = hash_password(new_pwd)
+
+    from sqlalchemy import delete
+    await db.execute(delete(AdminSession).where(AdminSession.admin_user_id == user.id))
+
+    req.status = "resolved"
+    req.temp_password = new_pwd
+    req.resolved_by = admin.username
+    req.resolved_at = datetime.now(timezone.utc)
+    if payload and payload.notes:
+        req.notes = payload.notes
+
+    await db.commit()
+    return {
+        "ok": True,
+        "id": req.id,
+        "username": req.username,
+        "temp_password": new_pwd,
+        "message": f"Password reset for '{req.username}'. Provide the temporary password to the user."
+    }
+
+
+@app.post("/api/superadmin/password-resets/{request_id}/reject", tags=["Super Admin"])
+async def superadmin_reject_password_reset(
+    request_id: int,
+    payload: Optional[PasswordResetReject] = None,
+    admin: AdminUser = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Super Admin rejects/dismisses a forgot password request.
+    """
+    req = (await db.execute(select(PasswordResetRequest).where(PasswordResetRequest.id == request_id))).scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Password reset request not found")
+
+    req.status = "rejected"
+    req.resolved_by = admin.username
+    req.resolved_at = datetime.now(timezone.utc)
+    if payload and payload.reason:
+        req.notes = payload.reason
+
+    await db.commit()
+    return {"ok": True, "id": req.id, "status": "rejected"}
+
+
+@app.get("/superadmin", tags=["Super Admin Portal"])
+@app.get("/super-admin", tags=["Super Admin Portal"])
+async def get_superadmin_portal():
+    """Serves the Super Admin Dashboard."""
+    page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "superadmin.html")
+    if os.path.exists(page_path):
+        return FileResponse(page_path)
+    return HTMLResponse("<h2>Error: static/superadmin.html not found</h2>", status_code=404)
+
 
 
 @app.post("/api/upload/product-image", tags=["Products"])

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasala Nature Resort - Admin Control Center</title>
+    <title>AI Bot Platform - Admin Control Center</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
@@ -460,9 +460,9 @@
     <div id="loginOverlay" class="login-overlay">
         <div class="login-card">
             <div class="login-brand">
-                <i class="fa-solid fa-hotel"></i>
+                <i class="fa-solid fa-robot"></i>
                 <h2>Admin Portal</h2>
-                <p>Wasala Nature Resort &mdash; Control Center</p>
+                <p>Business &amp; Bot Control Center</p>
             </div>
             <div style="margin-bottom: 1rem;">
                 <label class="login-label">Username</label>
@@ -479,6 +479,11 @@
             <button class="btn btn-primary btn-block" onclick="login()">
                 <i class="fa-solid fa-right-to-bracket"></i> Sign In
             </button>
+            <div style="text-align: center; margin-top: 0.85rem;">
+                <a href="#" onclick="openForgotPasswordPrompt(event)" style="color: var(--text-muted); font-size: 0.82rem; text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='#f8fafc'" onmouseout="this.style.color='var(--text-muted)'">
+                    <i class="fa-solid fa-key" style="font-size:0.75rem;"></i> Forgot Password?
+                </a>
+            </div>
             <div id="loginError" class="login-error">
                 <i class="fa-solid fa-circle-exclamation"></i> Incorrect username or password.
             </div>
@@ -494,6 +499,9 @@
         </div>
         <div class="navbar-right">
             <div class="nav-links">
+                <a href="/superadmin" id="superAdminLink" style="color: #c084fc; font-weight: 600; display: none;" title="Super Admin Telemetry & Accounts">
+                    <i class="fa-solid fa-server"></i> Super Admin
+                </a>
                 <a href="/admin" class="active">Admin</a>
                 <a href="/orders">Orders</a>
                 <a href="/train">Train Bot</a>
@@ -544,7 +552,7 @@
             </div>
         </div>
 
-        <!-- Banquet Pricing & Package Calculator (Shown for Wasala / Banquet businesses) -->
+        <!-- Banquet Pricing & Package Calculator (Shown for Banquet businesses) -->
         <div id="banquetSection" style="display: none;">
             <!-- 1. Pricing Matrix -->
             <div class="card">
@@ -676,18 +684,18 @@
             <div class="grid-2">
                 <div class="form-group">
                     <label>Bot / Business Name</label>
-                    <input type="text" id="businessName" class="form-control" value="Wasala Nature Resort - Banquet &amp; Events">
+                    <input type="text" id="businessName" class="form-control" placeholder="Business Name">
                 </div>
                 <div class="form-group">
                     <label>WhatsApp Manager Number (Handoff)</label>
-                    <input type="text" id="handoffNumber" class="form-control" value="+94779998877" placeholder="+94 77 999 8877">
+                    <input type="text" id="handoffNumber" class="form-control" placeholder="+94 77 123 4567">
                 </div>
             </div>
 
             <div class="grid-2">
                 <div class="form-group">
                     <label>Front Office / Hotline Number</label>
-                    <input type="text" id="frontOfficeNumber" class="form-control" value="+94342275000" placeholder="+94 34 227 5000">
+                    <input type="text" id="frontOfficeNumber" class="form-control" placeholder="+94 11 234 5678">
                 </div>
                 <div class="form-group" style="display:flex; align-items:flex-end; padding-bottom:0.25rem;">
                     <p style="color:var(--text-muted); font-size:0.82rem; line-height:1.5;">
@@ -700,7 +708,7 @@
             <div class="form-group">
                 <label>AI System Instructions / Persona Prompt</label>
                 <input type="text" id="systemPrompt" class="form-control"
-                    value="You are the senior Banquet &amp; Event Planning AI Consultant for Wasala Nature Resort in Bentota, Sri Lanka. Answer guests warmly and accurately in English, Sinhala, or Singlish with official package prices.">
+                    placeholder="You are a professional customer support AI assistant for our business...">
             </div>
 
             <div class="form-group" style="margin-bottom:0;">
@@ -848,8 +856,8 @@
         }
 
         // ===== AUTH =====
-        function getToken() { return sessionStorage.getItem('adminToken'); }
-        function getRole() { return sessionStorage.getItem('adminRole'); }
+        function getToken() { return sessionStorage.getItem('adminToken') || localStorage.getItem('admin_token'); }
+        function getRole() { return sessionStorage.getItem('adminRole') || localStorage.getItem('admin_role'); }
 
         async function authFetch(url, options = {}) {
             const token = getToken();
@@ -860,6 +868,23 @@
                 throw new Error('Unauthorized');
             }
             return res;
+        }
+
+        async function openForgotPasswordPrompt(e) {
+            if (e) e.preventDefault();
+            const username = prompt("Enter your account username or email to request a password reset:");
+            if (!username || !username.trim()) return;
+            try {
+                const res = await fetch('/api/auth/forgot-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: username.trim() })
+                });
+                const data = await res.json();
+                alert(data.message || 'Password reset request submitted. Your Super Administrator will review and reset your credentials.');
+            } catch (err) {
+                alert('Failed to submit request: ' + err.message);
+            }
         }
 
         async function login() {
@@ -880,6 +905,8 @@
                     sessionStorage.setItem('adminToken', data.token);
                     sessionStorage.setItem('adminUsername', data.username);
                     sessionStorage.setItem('adminRole', data.role);
+                    localStorage.setItem('admin_token', data.token);
+                    localStorage.setItem('admin_role', data.role);
                     document.getElementById('loginOverlay').style.display = 'none';
                     afterLogin();
                 } else {
@@ -893,8 +920,12 @@
         }
 
         function afterLogin() {
-            document.getElementById('loggedInAs').textContent = `${sessionStorage.getItem('adminUsername')} (${getRole()})`;
+            document.getElementById('loggedInAs').textContent = `${sessionStorage.getItem('adminUsername') || 'Admin'} (${getRole()})`;
             document.getElementById('staffCard').style.display = getRole() === 'owner' ? 'block' : 'none';
+            const superLink = document.getElementById('superAdminLink');
+            if (superLink) {
+                superLink.style.display = getRole() === 'owner' ? 'inline-flex' : 'none';
+            }
             loadTenants();
             if (getRole() === 'owner') loadStaffAccounts();
 
@@ -906,6 +937,7 @@
 
         function showLoginOverlay(message) {
             sessionStorage.removeItem('adminToken');
+            localStorage.removeItem('admin_token');
             document.getElementById('loginOverlay').style.display = 'flex';
             if (message) {
                 const errEl = document.getElementById('loginError');
@@ -919,6 +951,8 @@
         async function logout() {
             try { await authFetch('/api/admin/logout', { method: 'POST' }); } catch {}
             sessionStorage.clear();
+            localStorage.removeItem('admin_token');
+            localStorage.removeItem('admin_role');
             document.getElementById('loginOverlay').style.display = 'flex';
             document.getElementById('loginPassword').value = '';
             document.getElementById('loginUsername').focus();
@@ -1149,7 +1183,7 @@
                 const el = document.getElementById(id);
                 return el ? el.value : '';
             };
-            const kb = `=== WASALA NATURE RESORT - BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
+            const kb = `=== BANQUET & EVENTS MASTER KNOWLEDGE BASE ===
 
 🏛️ BANQUET HALLS AVAILABLE:
 1. Grand Ballroom (Capacity 150-650 guests)
@@ -1220,8 +1254,7 @@ PREMIER MENU PACKAGES:
                     document.getElementById('handoffNumber').value = data.human_handoff_number || '';
                     document.getElementById('frontOfficeNumber').value = data.front_office_number || '';
 
-                    const isBanquet = (data.business_name || '').toLowerCase().includes('wasala') ||
-                                      (data.business_name || '').toLowerCase().includes('banquet');
+                    const isBanquet = (data.business_name || '').toLowerCase().includes('banquet');
                     const banquetSec = document.getElementById('banquetSection');
                     if (banquetSec) banquetSec.style.display = isBanquet ? 'block' : 'none';
 

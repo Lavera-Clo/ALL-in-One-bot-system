@@ -31,3 +31,25 @@ def generate_session_token() -> str:
 
 def session_expiry() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+
+
+WEAK_PASSWORDS = {
+    "password", "123456", "12345678", "123456789", "admin123", "admin", "welcome", "qwerty"
+}
+
+
+def validate_password_strength(password: str, username: str = "") -> tuple[bool, str]:
+    """
+    Enforces password security:
+    - Minimum 8 characters
+    - Not on common weak passwords list
+    - Does not contain username
+    """
+    if not password or len(password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if password.lower() in WEAK_PASSWORDS:
+        return False, "Password is too common and easily guessed. Please choose a stronger password."
+    if username and len(username) >= 4 and username.lower() in password.lower():
+        return False, "Password cannot contain your username or email."
+    return True, ""
+
