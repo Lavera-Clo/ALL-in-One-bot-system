@@ -278,8 +278,15 @@ async def _ask_gemini(audio: bytes, mime: str, names: list[str], written_style: 
 
 
 async def understand_voice_note(audio: bytes, mime: str = "audio/ogg", business_name: str = "",
-                                words: Iterable[str] = (), written_style: str = "") -> VoiceResult:
-    """Hear a voice note. Never raises: a failure comes back as status 'failed'."""
+                                words: Iterable[str] = (), written_style: str = "",
+                                second_opinion_seconds: Optional[float] = None) -> VoiceResult:
+    """
+    Hear a voice note. Never raises: a failure comes back as status 'failed'.
+
+    `second_opinion_seconds`: on a live call someone is waiting, so the second listener (Gemini, for
+    Sinhala or an unsure Whisper) gets only this long; after that Whisper's words are used. A voice
+    note has no deadline (None): getting it right matters more than a few seconds.
+    """
     if not audio:
         return VoiceResult("failed")
     sound = await asyncio.to_thread(measure_sound, audio)
@@ -314,7 +321,10 @@ async def understand_voice_note(audio: bytes, mime: str = "audio/ogg", business_
                 return whisper_result          # sure, and English: nothing to improve on
 
     try:
-        second = await _ask_gemini(audio, mime, names, written_style)
+        second = await asyncio.wait_for(_ask_gemini(audio, mime, names, written_style), timeout=second_opinion_seconds)
+    except asyncio.TimeoutError:
+        logger.info(f"Voice note: the second listener took over {second_opinion_seconds}s; using Whisper's words")
+        second = None
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Voice note: Gemini failed: {exc}")
         second = None

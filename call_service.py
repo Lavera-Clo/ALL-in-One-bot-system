@@ -93,6 +93,61 @@ LINES = {
 }
 
 
+# Said straight away when an answer takes more than a moment, so the caller isn't left in silence.
+FILLERS = {
+    "english": ["Okay, one moment.", "Sure, let me check.", "Alright, just a second."],
+    "sinhala": ["හරි, පොඩ්ඩක් ඉන්න.", "හරි, මම බලන්නම්.", "හරි, එක තත්පරයක්."],
+}
+GREETING_WAIT = 3.0            # longest the phone keeps ringing while the greeting is made
+FILLER_AFTER = 1.0             # seconds of thinking before a filler is said
+FILLER_EARLY_SPEECH = 1.2      # said this long or longer: surely words, so the filler clock starts at once
+FILLER_AFTER_HEARD = 0.3       # shorter: start it only once speech-to-text found words (not a cough)
+STT_SECOND_OPINION = 3.5       # seconds the second listener may take on a call
+TURN_TIMEOUT = 25.0            # a whole turn (hear + think + speak) longer than this is given up
+
+
+def filler_lines(language: str) -> List[str]:
+    return FILLERS["sinhala" if _sinhala(language) else "english"]
+
+
+def sentences(text: str) -> List[str]:
+    """A reply cut into sentences, so the first can be spoken while the rest is being made."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?।])\s+", (text or "").strip()) if p.strip()]
+    merged: List[str] = []
+    for p in parts:                      # very short bits ("Yes.") ride with the next sentence
+        if merged and len(merged[-1]) < 25:
+            merged[-1] = f"{merged[-1]} {p}"
+        else:
+            merged.append(p)
+    return merged
+
+
+# Speech for short fixed lines (greetings, fillers) is made once and kept: the same business says
+# the same greeting on every call, and making it takes 1-2 seconds. Only bytes are kept - nothing
+# about a call - so calls can't affect each other through it.
+_speech_cache: Dict[str, "asyncio.Future"] = {}
+_SPEECH_CACHE_MAX = 64
+_CACHEABLE_CHARS = 200
+
+
+def speech_soon(text: str) -> "asyncio.Future":
+    """Start making `text` into speech now (or reuse it); await the result when it's needed."""
+    if len(text) > _CACHEABLE_CHARS:
+        return asyncio.ensure_future(speech_pcm(text))
+    fut = _speech_cache.get(text)
+    if fut is not None and not (fut.done() and (fut.cancelled() or fut.exception() or not fut.result())):
+        return fut
+    if len(_speech_cache) >= _SPEECH_CACHE_MAX:
+        _speech_cache.pop(next(iter(_speech_cache)))
+    fut = _speech_cache[text] = asyncio.ensure_future(speech_pcm(text))
+    return fut
+
+
+def prepare(text: str) -> List["asyncio.Future"]:
+    """Start making `text` into speech the way say() will speak it: sentence by sentence."""
+    return [speech_soon(part) for part in sentences(text) or [text]]
+
+
 def line(name: str, language: str, business: str = "") -> str:
     english, sinhala = LINES[name]
     return (sinhala if _sinhala(language) else english).format(business=business or "us")
@@ -310,6 +365,10 @@ class CallSession:
         self.taken_by: Optional[str] = None
         self.pending_agent: Optional["CallSession"] = None
         self.ring_decided = asyncio.Event()     # incoming: the team answered, or let the AI take it
+        self.speech_turn = 0                    # +1 when the caller talks over the bot: stop the rest
+        self.fillers_used = 0
+        self._filler: Optional[asyncio.Future] = None
+        self.ai_allowed: Optional[bool] = None   # incoming: may the AI answer (checked while it rings)
         # Recording: the caller (left) and what they heard (right), 16 kHz, both 20 ms at a time.
         self.rec_in = bytearray()
         self.rec_out = bytearray()
@@ -367,12 +426,40 @@ class CallSession:
     async def say(self, text: str, record: bool = True) -> None:
         if not text or self.ended.is_set():
             return
+        turn = self.speech_turn
+        # All sentences are made at once; each is played as soon as it's ready, in order.
+        pending_parts = prepare(text)
         if record:
+            # Saving to the chat history runs alongside: the caller shouldn't wait for the database.
             self.transcript.append({"who": "bot", "text": text})
-            await self._save_turn("assistant", "bot", text)
-        pcm = await speech_pcm(text)
-        if pcm:
+            self.tasks.append(asyncio.ensure_future(self._save_turn("assistant", "bot", text)))
+        for pending in pending_parts:
+            try:
+                pcm = await pending
+            except Exception:  # noqa: BLE001
+                pcm = b""
+            if self.ended.is_set() or self.speech_turn != turn:
+                return                      # hung up, or talked over: don't say the rest
+            if pcm:
+                self.speaker.say(pcm)
+
+    async def _filler_if_slow(self, after: float = FILLER_AFTER) -> None:
+        """Said when the answer takes more than `after` seconds: "Okay, one moment." in their language."""
+        await asyncio.sleep(after)
+        if self.ended.is_set() or self.speaker.talking or self.partner is not None:
+            return
+        options = filler_lines(self.language)
+        text = options[self.fillers_used % len(options)]
+        self.fillers_used += 1
+        pcm = await speech_soon(text)
+        if pcm and not self.ended.is_set() and not self.speaker.talking:
             self.speaker.say(pcm)
+
+    def warm_up(self) -> None:
+        """Make the greeting and the fillers into speech ahead of time (while it rings)."""
+        prepare(line("greet", self.language, self.business))
+        for text in filler_lines(self.language):
+            speech_soon(text)
 
     async def wait_until_quiet(self, limit: float = 30.0) -> None:
         for _ in range(int(limit / 0.1)):
@@ -383,6 +470,7 @@ class CallSession:
     def on_barge_in(self) -> None:
         # They started talking over the bot: stop and listen (as a person would).
         if self.speaker.talking and not self.hang_up_after_speaking:
+            self.speech_turn += 1
             self.speaker.stop_talking()
 
     # --- listening -------------------------------------------------------------
@@ -391,36 +479,60 @@ class CallSession:
         if self.ended.is_set() or self.handed_over:
             return
         async with self.turn_lock:
-            from voice_service import business_words, understand_voice_note
-            async with AsyncSessionLocal() as db:
-                tenant = await db.get(Tenant, self.tenant_id)
-                words = await business_words(db, tenant)
-            heard = await understand_voice_note(wav_bytes(pcm), "audio/wav", self.business, words)
-            if heard.status != "ok" or not heard.text.strip() or heard.unclear:
-                if heard.status == "ok" or heard.text.strip():
-                    self.missed_turns += 1
-                    if self.missed_turns <= 2:
-                        await self.say(line("again", self.language), record=False)
-                return
-            self.missed_turns = 0
-            said = heard.text.strip()
-            if heard.language in ("english", "sinhala", "singlish"):
-                self.language = heard.language
-            self.transcript.append({"who": "customer", "text": said})
-            await self._save_turn("user", "customer", said)
+            long_enough = len(pcm) / 2 / 16_000 >= FILLER_EARLY_SPEECH
+            self._filler = asyncio.ensure_future(self._filler_if_slow()) if long_enough else None
+            try:
+                await asyncio.wait_for(self._turn(pcm), timeout=TURN_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(f"[call] a turn took over {TURN_TIMEOUT}s; asking the caller to repeat")
+                self._stop_filler()
+                await self.say(line("again", self.language), record=False)
+            finally:
+                self._stop_filler()
 
-            if wants_person(said) or needs_person(heard.english or said, ""):
-                await self.hand_over(said)
-                return
-            reply, handoff = await ai_reply(self.tenant_id, self.phone, said, self.purpose)
-            await self.say(reply)
-            if handoff:
-                await self.wait_until_quiet()
-                await self.hand_over(said)
-            elif is_goodbye(heard.english or said):
-                self.hang_up_after_speaking = True
-                await self.wait_until_quiet()
-                await self.hang_up()
+    def _stop_filler(self) -> None:
+        if self._filler is not None:
+            self._filler.cancel()
+            self._filler = None
+
+    async def _turn(self, pcm: bytes) -> None:
+        """One thing the caller said: hear it, answer it."""
+        from voice_service import business_words, understand_voice_note
+        async with AsyncSessionLocal() as db:
+            tenant = await db.get(Tenant, self.tenant_id)
+            words = await business_words(db, tenant)
+        heard = await understand_voice_note(wav_bytes(pcm), "audio/wav", self.business, words,
+                                            second_opinion_seconds=STT_SECOND_OPINION)
+        if heard.status != "ok" or not heard.text.strip() or heard.unclear:
+            self._stop_filler()
+            if heard.status == "ok" or heard.text.strip():
+                self.missed_turns += 1
+                if self.missed_turns <= 2:
+                    await self.say(line("again", self.language), record=False)
+            return
+        self.missed_turns = 0
+        said = heard.text.strip()
+        if heard.language in ("english", "sinhala", "singlish"):
+            self.language = heard.language
+        self.transcript.append({"who": "customer", "text": said})
+        if self._filler is None:
+            self._filler = asyncio.ensure_future(self._filler_if_slow(FILLER_AFTER_HEARD))
+        await self._save_turn("user", "customer", said)
+
+        if wants_person(said) or needs_person(heard.english or said, ""):
+            self._stop_filler()             # "One moment, I'm connecting you" says it already
+            await self.hand_over(said)
+            return
+        reply, handoff = await ai_reply(self.tenant_id, self.phone, said, self.purpose)
+        self._stop_filler()
+        await self.say(reply)
+        if handoff:
+            await self.wait_until_quiet()
+            await self.hand_over(said)
+        elif is_goodbye(heard.english or said):
+            self.hang_up_after_speaking = True
+            await self.wait_until_quiet()
+            await self.hang_up()
 
     async def _save_turn(self, role: str, sender: str, text: str) -> None:
         if self.role != "customer":
@@ -542,6 +654,11 @@ class CallSession:
     async def started(self) -> None:
         """They picked up (or we picked up): say the first line, start the clock."""
         self.answered.set()
+        greeting = None
+        if (self.role == "customer" and self.direction == "incoming" and not self.taken_by
+                and self.pending_agent is None and self.ai_allowed):
+            # The first words go out before anything is written down.
+            greeting = asyncio.ensure_future(self.say(line("greet", self.language, self.business)))
         async with AsyncSessionLocal() as db:
             await _set_row(db, self.call_row_id, status="with_team" if self.partner else "in_progress",
                            started_at=utc_now())
@@ -558,6 +675,8 @@ class CallSession:
             return                         # a person answered it ringing: already joined
         if self.direction == "outgoing":
             await self.say(await opening_line(self.business, self.purpose, self.language))
+        elif greeting is not None:
+            await greeting
         else:
             async with AsyncSessionLocal() as db:
                 tenant = await db.get(Tenant, self.tenant_id)
@@ -935,6 +1054,9 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
     session = CallSession(tenant, phone, "incoming", row_id, language=language)
     session.wa_call_id = call_id
     _sessions[call_id] = session
+    session.warm_up()                       # the greeting is ready the moment the call connects
+    async with AsyncSessionLocal() as db:
+        session.ai_allowed = bot_may_reply(tenant, await get_conversation(db, tenant.id, phone))
     try:
         await session.pc.setRemoteDescription(RTCSessionDescription(sdp=offer, type="offer"))
         answer = await session.pc.createAnswer()
@@ -943,7 +1065,7 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
         await calls_api(tenant, {"call_id": call_id, "action": "pre_accept", "session": {"sdp_type": "answer", "sdp": sdp}})
         # The team's websites ring first; whoever presses Answer takes it. Nobody within
         # CALL_TEAM_RING_SECONDS (or "Let the AI answer") -> the AI picks up.
-        if settings.CALL_TEAM_RING_SECONDS > 0:
+        if settings.CALL_TEAM_RING_SECONDS > 0 and team_online(tenant.id):
             await ring_team(tenant.id, row_id, phone, name)
             try:
                 await asyncio.wait_for(session.ring_decided.wait(), timeout=settings.CALL_TEAM_RING_SECONDS)
@@ -952,6 +1074,17 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
             session.ring_decided.set()
             if session.ended.is_set():
                 return                      # they hung up while it rang
+        if not session.taken_by:
+            # The AI answers: let it ring a moment longer until the greeting is ready, so the caller
+            # never hears silence after picking up (usually ready already: made while it rang, or
+            # kept from an earlier call).
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.gather(*prepare(line("greet", session.language, session.business)))),
+                                       timeout=GREETING_WAIT)
+            except Exception:  # noqa: BLE001 - slow or failed voice: answer anyway
+                pass
+            if session.ended.is_set():
+                return
         await calls_api(tenant, {"call_id": call_id, "action": "accept", "session": {"sdp_type": "answer", "sdp": sdp},
                                  "biz_opaque_callback_data": f"call:{row_id}"})
     except Exception:
@@ -984,6 +1117,12 @@ async def _close_row(tenant: Tenant, call_id: str, event: dict) -> None:
 # The browser makes its own WebRTC connection to this server (microphone and speaker); this server
 # joins it to the WhatsApp call exactly as it joins the manager's phone: each side hears the other.
 # The browser sends its SDP offer once its ICE candidates are gathered, and gets the answer back.
+
+def team_online(tenant_id: int) -> bool:
+    """Is a website that can answer calls open for this business? If not, nobody to ring: the AI answers at once."""
+    from realtime import call_desks
+    return bool(call_desks.active.get(tenant_id))
+
 
 async def ring_team(tenant_id: int, call_row_id: int, phone: str, name: Optional[str]) -> None:
     from realtime import inbox_manager

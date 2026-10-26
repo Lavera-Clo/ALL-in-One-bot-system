@@ -158,7 +158,7 @@ async def fake_text(tenant, phone, text):
     sent_texts.append((phone, text))
 
 
-async def fake_hear(audio, mime="audio/ogg", business_name="", words=(), written_style=""):
+async def fake_hear(audio, mime="audio/ogg", business_name="", words=(), written_style="", **_):
     text = heard_queue.pop(0) if heard_queue else ""
     return voice_service.VoiceResult("ok" if text else "no_speech", text, "english", "", 0.95, "test")
 
@@ -474,6 +474,8 @@ async def browser_offer():
 
 
 async def test_team(tenant):
+    import realtime
+    realtime.call_desks.active[tenant.id] = [object()]        # a website that answers calls is open
     print("\nIncoming call rings the team's website first")
     settings.CALL_TEAM_RING_SECONDS = 6
     phone, task = await ringing_call(tenant, "wacid.team.1")
@@ -609,7 +611,7 @@ SECOND = "94772220000"
 A_HZ, B_HZ = 700, 1300
 
 
-async def hear_by_tone(audio, mime="audio/ogg", business_name="", words=(), written_style=""):
+async def hear_by_tone(audio, mime="audio/ogg", business_name="", words=(), written_style="", **_):
     """Speech-to-text for the two-caller test: what was 'said' depends on the voice (tone) heard."""
     pcm = call_audio.decode_to_pcm(audio, 16_000)
     hz = main_hz(pcm, 16_000)
@@ -677,7 +679,7 @@ async def test_two_calls(tenant):
 TEAM_HZ = 1000
 
 
-async def hear_team_call(audio, mime="audio/ogg", business_name="", words=(), written_style=""):
+async def hear_team_call(audio, mime="audio/ogg", business_name="", words=(), written_style="", **_):
     """Speech-to-text for the learning test: the customer's tone asks, the team's tone answers."""
     hz = main_hz(call_audio.decode_to_pcm(audio, 16_000), 16_000)
     if abs(hz - CUSTOMER_HZ) < 60:
@@ -776,6 +778,120 @@ async def test_learning(tenant):
         voice_service.understand_voice_note = fake_hear
 
 
+FILLER_HZ = 520
+
+
+async def test_speed(tenant):
+    print("\nNo silence for the caller")
+    import realtime
+    settings.CALL_TEAM_RING_SECONDS = 15
+    realtime.call_desks.active.pop(tenant.id, None)          # nobody has the website open
+    cs._speech_cache.clear()
+    made = []
+
+    async def slow_speech(text):
+        """Speech that takes 1.5 s to make, like the real voice service."""
+        made.append(text)
+        await asyncio.sleep(1.5)
+        return tone(FILLER_HZ if text in cs.FILLERS["english"] else BOT_HZ, 1.2)
+
+    # Baseline: how long the connection itself takes before any sound arrives (instant voice).
+    base_phone = Phone()
+    await base_phone.pc.setLocalDescription(await base_phone.pc.createOffer())
+    api_calls.clear()
+    await cs.handle_call_events(tenant, {"calls": [{"id": "wacid.fast.0", "from": SECOND, "event": "connect",
+        "direction": "USER_INITIATED", "session": {"sdp_type": "offer", "sdp": base_phone.pc.localDescription.sdp}}]})
+    acc0 = next(b for b in api_calls if b.get("action") == "accept")
+    await base_phone.pc.setRemoteDescription(RTCSessionDescription(acc0["session"]["sdp"], "answer"))
+    b0 = time.monotonic()
+    await base_phone.hears(BOT_HZ, within=4)
+    baseline = time.monotonic() - b0
+    print(f"  (connection + detection with an instant voice: {baseline:.2f}s)")
+    await cs._sessions["wacid.fast.0"].hang_up()
+    await base_phone.close()
+    cs._speech_cache.clear()
+
+    cs.speech_pcm = slow_speech
+    heard_queue.clear()
+    phone = Phone()
+    await phone.pc.setLocalDescription(await phone.pc.createOffer())
+    api_calls.clear()
+    broadcasts.clear()
+    t0 = time.monotonic()
+    await cs.handle_call_events(tenant, {"calls": [{"id": "wacid.fast.1", "from": CUSTOMER, "event": "connect",
+        "direction": "USER_INITIATED", "session": {"sdp_type": "offer", "sdp": phone.pc.localDescription.sdp}}]})
+    check(time.monotonic() - t0 < 3, "nobody has the website open: the AI answers at once, no 15 s ring")
+    check(not any(b.get("type") == "call.ringing" for b in broadcasts), "and nobody is rung")
+    accept = next(b for b in api_calls if b.get("action") == "accept")
+    await phone.pc.setRemoteDescription(RTCSessionDescription(accept["session"]["sdp"], "answer"))
+    connected = time.monotonic()
+    check(await phone.hears(BOT_HZ, within=4), "the greeting plays")
+    greeted = time.monotonic() - connected
+    check(greeted < baseline + 0.4,
+          f"the greeting was ready at pick-up: heard {greeted:.1f}s after, the same as an instant voice ({baseline:.1f}s)")
+    session = cs._sessions["wacid.fast.1"]
+
+    print("\nA slow answer: the caller hears 'one moment' instead of silence")
+    real_reply = cs.ai_reply
+
+    async def slow_reply(tenant_id, phone_no, said, note=""):
+        await asyncio.sleep(4)
+        return "We open at nine in the morning. We close at eight in the evening.", False
+
+    cs.ai_reply = slow_reply
+    await asyncio.sleep(2.5)
+    heard_queue.append("what time do you open tomorrow")
+    phone.talk(CUSTOMER_HZ, 1.5)
+    t_end = time.monotonic() + 1.5
+    check(await phone.hears(FILLER_HZ, within=5), "a short 'Okay, one moment.' while the answer is made")
+    check(time.monotonic() - t_end < 3.0, "within about a second of them finishing")
+    check(not any(t["text"] in cs.FILLERS["english"] for t in session.transcript), "the filler isn't logged as an answer")
+    check(await phone.hears(BOT_HZ, within=10), "then the answer")
+    parts = [m for m in made if m.startswith("We open") or m.startswith("We close")]
+    check(len(parts) == 2, f"the answer was made sentence by sentence ({parts})")
+    cs.ai_reply = real_reply
+
+    print("\nTalking over the bot stops the rest of the answer")
+    session.speech_turn += 0
+    say = asyncio.ensure_future(session.say("First sentence of a long answer. Second sentence that should not be said."))
+    await asyncio.sleep(0.2)
+    session.on_barge_in()                      # nothing playing yet: nothing to stop
+    await asyncio.sleep(1.6)
+    before = session.speech_turn
+    session.speaker.say(tone(BOT_HZ, 3.0))
+    session.on_barge_in()
+    await asyncio.wait_for(say, 10)
+    check(session.speech_turn == before + 1 and not session.speaker.talking,
+          "talked over: the bot stops, and the remaining sentences are dropped")
+    await session.hang_up()
+    await phone.close()
+    cs.speech_pcm = fake_speech
+
+    print("\nA slow second listener doesn't hold up the call")
+    real_whisper, real_gemini = llm_router.transcribe_audio_detailed, voice_service._ask_gemini
+
+    async def whisper(audio, filename="", hint=""):
+        return {"text": "hෙට කීයටද ඇරෙන්නේ", "language": "sinhala", "avg_logprob": -0.2, "no_speech_prob": 0.0, "engine": "whisper"}
+
+    async def very_slow_gemini(*a, **k):
+        await asyncio.sleep(20)
+
+    llm_router.transcribe_audio_detailed, voice_service._ask_gemini = whisper, very_slow_gemini
+    real_hear = voice_service.understand_voice_note
+    voice_service.understand_voice_note = REAL_UNDERSTAND
+    try:
+        t = np.arange(16_000 * 2) / 16_000
+        syllables = (np.sin(2 * np.pi * 700 * t) * 9000 * (np.sin(2 * np.pi * 3 * t) > 0)).astype(np.int16)
+        loud = call_audio.wav_bytes(syllables.tobytes())   # on/off like speech, not a steady hum
+        t0 = time.monotonic()
+        heard = await voice_service.understand_voice_note(loud, "audio/wav", "City Shop", [], second_opinion_seconds=0.5)
+        check(time.monotonic() - t0 < 2 and heard.status == "ok" and heard.engine == "whisper",
+              "on a call, the second listener gets 0.5 s here (3.5 s live), then Whisper's words are used")
+    finally:
+        llm_router.transcribe_audio_detailed, voice_service._ask_gemini = real_whisper, real_gemini
+        voice_service.understand_voice_note = real_hear
+
+
 async def test_portal(tenant):
     print("\nPortal")
     async with AsyncSessionLocal() as db:
@@ -809,6 +925,8 @@ async def main_async():
     real_ai_reply = cs.ai_reply
     cs.ai_reply = fake_ai_reply
     cs.speech_pcm = fake_speech
+    global REAL_UNDERSTAND
+    REAL_UNDERSTAND = voice_service.understand_voice_note
     voice_service.understand_voice_note = fake_hear
     voice_service.business_words = fake_words
     llm_router.role_candidates = lambda role: []
@@ -830,6 +948,7 @@ async def main_async():
     await test_team(t)
     await test_two_calls(t)
     await test_learning(t)
+    await test_speed(t)
     await test_portal(t)
     for s in list(cs._sessions.values()):
         await s.finish()

@@ -124,7 +124,7 @@ class Listener:
     Reads the caller's audio and calls `on_utterance(pcm16k)` each time they finish a sentence.
     `on_barge_in()` fires when they start talking while the bot is still speaking.
     """
-    END_SILENCE = 0.8          # seconds of quiet that end an utterance
+    END_SILENCE = 0.6          # seconds of quiet that end an utterance (longer = slower replies)
     MIN_SPEECH = 0.35          # shorter than this is a cough or a click
     MAX_UTTERANCE = 20.0
 

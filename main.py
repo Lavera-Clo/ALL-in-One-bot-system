@@ -133,7 +133,7 @@ from order_service import (
 from auth_service import hash_password, verify_password, generate_session_token, session_expiry, validate_password_strength
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
 from invoice_service import generate_invoice_pdf
-from realtime import manager as ws_manager, inbox_manager
+from realtime import manager as ws_manager, inbox_manager, call_desks
 from inbox_service import (
     bot_may_reply, chat_messages, describe_incoming, get_conversation, is_manager, list_chats, mark_needs_human,
     on_whatsapp_sent, record_incoming, send_as_agent, send_other_as_agent, set_business_bot, set_chat_bot, update_incoming_text,
@@ -2050,7 +2050,8 @@ async def create_manual_order_api(tenant_id: int, payload: ManualOrderCreate,
 
 
 @app.websocket("/ws/inbox/{tenant_id}")
-async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[str] = Query(None)):
+async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[str] = Query(None),
+                          calls: Optional[str] = Query(None)):
     """
     Live updates for an open inbox: chat changes, the master switch, and order events. Opens its
     own short database session to check the token, so no session stays open for the socket's life.
@@ -2066,6 +2067,8 @@ async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[
     await websocket.accept()
     inbox_manager.register(tenant_id, websocket)
     ws_manager.register(tenant_id, websocket)       # order_created / order_updated too
+    if calls == "1":
+        call_desks.register(tenant_id, websocket)   # this website answers calls: ring it first
     try:
         while True:
             await websocket.receive_text()
@@ -2074,6 +2077,7 @@ async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[
     finally:
         inbox_manager.disconnect(tenant_id, websocket)
         ws_manager.disconnect(tenant_id, websocket)
+        call_desks.disconnect(tenant_id, websocket)
 
 
 # ---------------------------------------------------------------------------
