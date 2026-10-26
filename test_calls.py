@@ -79,12 +79,13 @@ class Phone:
             self.task = asyncio.ensure_future(self._ear(track))
 
     async def _ear(self, track):
+        to48 = call_audio.ToMono(48_000)
         while True:
             try:
                 frame = await track.recv()
             except MediaStreamError:
                 return
-            self.heard.extend(call_audio.to_mono(frame, 48_000))
+            self.heard.extend(to48(frame))
 
     def talk(self, hz: int, seconds: float = 1.0):
         self.mouth.say(tone(hz, seconds))
@@ -171,10 +172,12 @@ async def fake_speech(text):
 
 
 replies = []
+replies_by_phone = []
 
 
 async def fake_ai_reply(tenant_id, phone, said, note=""):
     replies.append((said, note))
+    replies_by_phone.append((said, note, phone))
     if "refund" in said.lower():
         return "I'll get the team for that.", True
     return "We open at 8 in the morning.", False
@@ -602,6 +605,177 @@ async def test_team(tenant):
     await browser.close()
 
 
+SECOND = "94772220000"
+A_HZ, B_HZ = 700, 1300
+
+
+async def hear_by_tone(audio, mime="audio/ogg", business_name="", words=(), written_style=""):
+    """Speech-to-text for the two-caller test: what was 'said' depends on the voice (tone) heard."""
+    pcm = call_audio.decode_to_pcm(audio, 16_000)
+    hz = main_hz(pcm, 16_000)
+    if abs(hz - A_HZ) < 60:
+        return voice_service.VoiceResult("ok", "what time do you open", "english", "", 0.95, "test")
+    if abs(hz - B_HZ) < 60:
+        return voice_service.VoiceResult("ok", "do you deliver to Kandy", "english", "", 0.95, "test")
+    return voice_service.VoiceResult("no_speech", "", "", "", 0.0, "test")
+
+
+async def test_two_calls(tenant):
+    print("\nTwo customers call at the same time")
+    settings.CALL_TEAM_RING_SECONDS = 0
+    voice_service.understand_voice_note = hear_by_tone
+    replies.clear()
+    replies_by_phone.clear()
+    api_calls.clear()
+
+    async def call_from(number, call_id):
+        phone = Phone()
+        await phone.pc.setLocalDescription(await phone.pc.createOffer())
+        await cs.handle_call_events(tenant, {
+            "contacts": [{"wa_id": number, "profile": {"name": number}}],
+            "calls": [{"id": call_id, "from": number, "event": "connect", "direction": "USER_INITIATED",
+                       "session": {"sdp_type": "offer", "sdp": phone.pc.localDescription.sdp}}]})
+        accept = next(b for b in api_calls if b.get("action") == "accept" and b["call_id"] == call_id)
+        await phone.pc.setRemoteDescription(RTCSessionDescription(accept["session"]["sdp"], "answer"))
+        return phone
+
+    a = await call_from(CUSTOMER, "wacid.two.a")
+    check(await a.hears(BOT_HZ), "first caller is greeted")
+    await asyncio.sleep(1.2)
+    a.talk(A_HZ, 1.0)                              # first caller asks something...
+    b = await call_from(SECOND, "wacid.two.b")     # ...while a second caller rings in
+    check(await b.hears(BOT_HZ), "second caller is greeted too")
+    await asyncio.sleep(1.2)
+    b.talk(B_HZ, 1.0)
+    check(await wait_for(lambda: len(replies) >= 2, 15), "both questions reach the AI")
+    by_phone = {}
+    for said, note, phone_no in replies_by_phone:
+        by_phone.setdefault(phone_no, []).append(said)
+    check(by_phone.get(CUSTOMER) == ["what time do you open"], f"first caller's question answered on the first call ({by_phone.get(CUSTOMER)})")
+    check(by_phone.get(SECOND) == ["do you deliver to Kandy"], f"second caller's question answered on the second call ({by_phone.get(SECOND)})")
+    sa, sb = cs._sessions["wacid.two.a"], cs._sessions["wacid.two.b"]
+    check(not sa.ended.is_set() and not sb.ended.is_set(), "neither call was dropped")
+    check([t["text"] for t in sa.transcript if t["who"] == "customer"] == ["what time do you open"]
+          and [t["text"] for t in sb.transcript if t["who"] == "customer"] == ["do you deliver to Kandy"],
+          "each call's transcript has only its own caller")
+    # The first call keeps going after the second one started.
+    await asyncio.sleep(1.5)
+    a.talk(A_HZ, 1.0)
+    check(await wait_for(lambda: sum(1 for r in replies_by_phone if r[2] == CUSTOMER) == 2, 15),
+          "the first caller can keep talking while the second call is on")
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(ChatHistory).where(ChatHistory.message_type == "call",
+                                                           ChatHistory.customer_phone_number == SECOND))).scalars().all()
+    check(rows and all("Kandy" in r.content or r.sender == "bot" for r in rows), "the second caller's chat history has only their call")
+    await sa.hang_up()
+    await sb.hang_up()
+    await a.close()
+    await b.close()
+    voice_service.understand_voice_note = fake_hear
+
+
+TEAM_HZ = 1000
+
+
+async def hear_team_call(audio, mime="audio/ogg", business_name="", words=(), written_style=""):
+    """Speech-to-text for the learning test: the customer's tone asks, the team's tone answers."""
+    hz = main_hz(call_audio.decode_to_pcm(audio, 16_000), 16_000)
+    if abs(hz - CUSTOMER_HZ) < 60:
+        return voice_service.VoiceResult("ok", "what time do you close on Sunday", "english", "", 0.95, "test")
+    if abs(hz - TEAM_HZ) < 60:
+        return voice_service.VoiceResult("ok", "on Sunday we close at 6 in the evening", "english", "", 0.95, "test")
+    return voice_service.VoiceResult("no_speech", "", "", "", 0.0, "test")
+
+
+async def test_learning(tenant):
+    print("\nLearning from a call the team handled")
+    from learning_service import gap_payload
+    from models import KnowledgeGap
+    settings.CALL_TEAM_RING_SECONDS = 6
+    voice_service.understand_voice_note = hear_team_call
+    asked = []
+
+    async def fake_json(role, messages, **kw):
+        system = messages[0]["content"]
+        asked.append(system[:40])
+        if "phone call between a customer and a staff member" in system:
+            assert "Customer: what time do you close on Sunday" in messages[1]["content"]
+            return ({"learned": [
+                {"question": "What time do you close on Sunday?", "answer": "On Sundays we close at 6pm."},
+                {"question": "Can you call me on my number?", "answer": "Yes, we will call you on +94 77 123 4567."},
+            ]}, None)
+        if "Summarise this phone call" in system:
+            return ({"summary": "Asked Sunday closing time; the team said 6pm."}, None)
+        return ({}, None)
+
+    real = (llm_router.role_candidates, llm_router.complete_json)
+    llm_router.role_candidates = lambda role: [("fake", "m")]
+    llm_router.complete_json = fake_json
+    try:
+        phone, task = await ringing_call(tenant, "wacid.learn.1")
+        row = await row_for("wacid.learn.1")
+        browser = await browser_offer()
+        answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+        await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+        await connect_caller(phone, task)
+        await asyncio.sleep(1.0)
+        phone.talk(CUSTOMER_HZ, 2.0)                   # customer asks
+        await asyncio.sleep(3.0)
+        browser.talk(TEAM_HZ, 2.5)                     # Kasun answers
+        await asyncio.sleep(3.5)
+        session = cs._sessions["wacid.learn.1"]
+        await session.hang_up()
+        check(session.learning_task is not None, "a call the team handled is learned from after hang-up")
+        learned = await asyncio.wait_for(session.learning_task, 30)
+        row = await row_for("wacid.learn.1")
+        transcript = json.loads(row.transcript)
+        check([t["who"] for t in transcript] == ["customer", "team"]
+              and "close on Sunday" in transcript[0]["text"] and transcript[1]["by"] == "Kasun",
+              "the person's part is transcribed: who said what, in order")
+        check(row.summary == "Asked Sunday closing time; the team said 6pm.", "the summary covers what the team said")
+        async with AsyncSessionLocal() as db:
+            hist = (await db.execute(select(ChatHistory).where(ChatHistory.message_type == "call",
+                                                               ChatHistory.sender == "agent"))).scalars().all()
+        check(any("close at 6" in h.content for h in hist), "the chat history has what the team said (the chat bot knows it)")
+        check(len(learned) == 1 and learned[0]["answer"] == "On Sundays we close at 6pm.",
+              "the general fact becomes a suggested answer")
+        check(all("+94" not in item["answer"] for item in learned), "something about this one customer (their number) is left out")
+        async with AsyncSessionLocal() as db:
+            gap = await db.get(KnowledgeGap, learned[0]["gap_id"])
+        payload = gap_payload(gap)
+        check(gap.status == "open" and gap.source == "call" and gap.answer is None
+              and payload["suggested_answer"] == "On Sundays we close at 6pm.",
+              "it waits on 'Questions to answer' for the owner: not used until they save it")
+        check(any(b.get("type") == "learning.suggested" for b in broadcasts), "the business is told there's something to check")
+        await phone.close()
+        await browser.close()
+
+        print("\nA question the AI can't answer on a call")
+        import ai_service
+
+        async def unknown_reply(**kw):
+            return ai_service.BotReply(text="Let me check that with the team and get back to you.", unknown=True)
+
+        real_generate = ai_service.generate_bot_reply
+        ai_service.generate_bot_reply = unknown_reply
+        try:
+            async with AsyncSessionLocal() as db:
+                db.add(ChatHistory(tenant_id=tenant.id, customer_phone_number=CUSTOMER, role="user",
+                                   content="do you have parking for customers", sender="customer", message_type="call"))
+                await db.commit()
+            spoken, handoff = await real_ai_reply(tenant.id, CUSTOMER, "do you have parking for customers")
+        finally:
+            ai_service.generate_bot_reply = real_generate
+        async with AsyncSessionLocal() as db:
+            gaps = (await db.execute(select(KnowledgeGap).where(KnowledgeGap.source == "call",
+                                                                 KnowledgeGap.question.like("%parking%")))).scalars().all()
+        check(len(gaps) == 1 and gaps[0].status == "open" and "check" in (gaps[0].bot_reply or ""),
+              "it goes on 'Questions to answer', marked as from a call, like an unanswered chat question")
+    finally:
+        llm_router.role_candidates, llm_router.complete_json = real
+        voice_service.understand_voice_note = fake_hear
+
+
 async def test_portal(tenant):
     print("\nPortal")
     async with AsyncSessionLocal() as db:
@@ -631,6 +805,8 @@ async def main_async():
     cs.call_permission = fake_permission
     cs.ask_permission = fake_ask
     cs._send_text = fake_text
+    global real_ai_reply
+    real_ai_reply = cs.ai_reply
     cs.ai_reply = fake_ai_reply
     cs.speech_pcm = fake_speech
     voice_service.understand_voice_note = fake_hear
@@ -652,6 +828,8 @@ async def main_async():
     await test_transfer_unanswered(t)
     await test_outgoing(t)
     await test_team(t)
+    await test_two_calls(t)
+    await test_learning(t)
     await test_portal(t)
     for s in list(cs._sessions.values()):
         await s.finish()

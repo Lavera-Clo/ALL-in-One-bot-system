@@ -243,6 +243,9 @@ class KnowledgeGap(Base):
     source: Mapped[str] = mapped_column(String(20), default="chat", nullable=False)   # 'chat' | 'test' | 'owner'
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False, index=True)  # open | answered | dismissed
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)         # the owner's answer, once given
+    # What a person on the team told a caller (call_service.learn_from_call). Only a suggestion:
+    # it is used once the owner checks it and saves it as the answer.
+    suggested_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

@@ -1057,7 +1057,8 @@ async function loadGaps() {
             <div class="asked">Asked ${g.times_asked} time${g.times_asked === 1 ? '' : 's'}${g.language ? ' · ' + escapeHtml(g.language) : ''}</div>
             <input class="form-control" data-field="question" value="${escapeHtml(g.question)}" style="margin-top:0.4rem;font-weight:600">
             ${g.bot_reply ? `<div class="said"><b>Bot said:</b> ${escapeHtml(g.bot_reply)}</div>` : '<div style="height:0.7rem"></div>'}
-            <textarea class="form-control" data-field="answer" style="min-height:70px" placeholder="Type the answer the bot should give…"></textarea>
+            ${g.suggested_answer ? `<div class="said"><b><i class="fa-solid fa-phone"></i> Your team answered this on a call.</b> Check it, edit if needed, then save — the bot uses it only after you save.</div>` : ''}
+            <textarea class="form-control" data-field="answer" style="min-height:70px" placeholder="Type the answer the bot should give…">${escapeHtml(g.suggested_answer || '')}</textarea>
             <div style="display:flex;gap:0.4rem;margin-top:0.6rem;flex-wrap:wrap">
                 <button class="btn btn-primary btn-sm" data-gap-action="answer"><i class="fa-solid fa-check"></i> Save answer</button>
                 <button class="btn btn-ghost btn-sm" data-gap-action="dismiss">Ignore</button>

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     CALL_TEAM_RING_SECONDS: int = int(os.getenv("CALL_TEAM_RING_SECONDS", "15"))
     # Keep a recording of each call (the greeting tells callers). false = no recordings.
     CALL_RECORDING: bool = os.getenv("CALL_RECORDING", "true").strip().lower() not in ("0", "false", "no")
+    # After a call a person handled: transcribe it, keep it in the chat history, and suggest the
+    # facts they gave as answers for the owner to approve (call_service.learn_from_call).
+    CALL_LEARNING: bool = os.getenv("CALL_LEARNING", "true").strip().lower() not in ("0", "false", "no")
 
     # AI providers. Any combination may be set; llm_router.py tries them in order and
     # falls back when one is rate-limited, overloaded or out of quota.

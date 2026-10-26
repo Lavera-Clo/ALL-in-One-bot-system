@@ -75,6 +75,39 @@ async def record_gap(db: AsyncSession, tenant_id: int, question: str, bot_reply:
         return None
 
 
+async def suggest(db: AsyncSession, tenant_id: int, question: str, answer: str, language: str = "",
+                  customer_phone: str = "", source: str = "call") -> Optional[KnowledgeGap]:
+    """
+    A person on the team answered a customer's question (on a call): file it with their answer as a
+    suggestion. The owner checks it and saves it - the bot never uses it before that. A question that
+    is already answered is left alone.
+    """
+    question = _normalise(question)[:MAX_QUESTION_CHARS]
+    answer = (answer or "").strip()[:MAX_ANSWER_CHARS]
+    if len(question.split()) < 2 or not answer:
+        return None
+    try:
+        gap = await _find_similar(db, tenant_id, question)
+        if gap is None:
+            gap = KnowledgeGap(tenant_id=tenant_id, question=question, language=language or None,
+                               last_customer=customer_phone or None, source=source)
+            db.add(gap)
+        elif gap.status != "open":
+            return gap                       # answered (or dismissed) already: the owner decided
+        else:
+            gap.times_asked += 1
+            gap.last_customer = customer_phone or gap.last_customer
+        gap.suggested_answer = answer
+        await db.commit()
+        await db.refresh(gap)
+        logger.info(f"[learning] tenant {tenant_id}: suggestion for gap #{gap.id} from a {source}: {question[:80]!r}")
+        return gap
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        logger.exception("[learning] could not file a suggestion")
+        return None
+
+
 async def list_gaps(db: AsyncSession, tenant_id: int) -> List[KnowledgeGap]:
     stmt = (select(KnowledgeGap).where(KnowledgeGap.tenant_id == tenant_id)
             .order_by(KnowledgeGap.times_asked.desc(), KnowledgeGap.updated_at.desc()))
@@ -139,6 +172,7 @@ def gap_payload(gap: KnowledgeGap) -> dict:
         "source": gap.source,
         "status": gap.status,
         "answer": gap.answer,
+        "suggested_answer": gap.suggested_answer,
         "created_at": gap.created_at.isoformat() if gap.created_at else None,
         "updated_at": gap.updated_at.isoformat() if gap.updated_at else None,
         "answered_at": gap.answered_at.isoformat() if gap.answered_at else None,

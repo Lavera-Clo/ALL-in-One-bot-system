@@ -41,6 +41,7 @@ class SpeakerTrack(MediaStreamTrack):
         self._start: Optional[float] = None
         self.forward: Optional[MediaStreamTrack] = None   # set when bridged to another call
         self.tap: Optional[Callable[[bytes], None]] = None  # sees every 20 ms sent (call recording)
+        self._from_forward = ToMono(RATE)
 
     def say(self, pcm: bytes) -> None:
         self._buffer.extend(pcm)
@@ -67,7 +68,7 @@ class SpeakerTrack(MediaStreamTrack):
         if self.forward is not None and not self._buffer:
             try:
                 other = await asyncio.wait_for(self.forward.recv(), timeout=0.1)
-                pcm = to_mono(other, RATE)
+                pcm = self._from_forward(other)
             except (asyncio.TimeoutError, MediaStreamError):
                 pcm = None
         if pcm is None:
@@ -86,19 +87,29 @@ class SpeakerTrack(MediaStreamTrack):
         return frame
 
 
-_resamplers: dict = {}
+class ToMono:
+    """
+    Decoded frames of ONE audio stream -> s16le mono PCM at `rate`.
 
+    One per stream, never shared: a resampler keeps a few milliseconds of sound between frames, so
+    one shared by two calls mixed each caller's voice into the other's call (a second caller heard
+    as the first, the first caller's words answered on the second call).
+    """
 
-def to_mono(frame: av.AudioFrame, rate: int) -> bytes:
-    """Any decoded frame -> s16le mono PCM at `rate`."""
-    key = (frame.format.name, frame.layout.name, frame.sample_rate, rate)
-    resampler = _resamplers.get(key)
-    if resampler is None:
-        resampler = _resamplers[key] = av.AudioResampler(format="s16", layout="mono", rate=rate)
-    out = b""
-    for f in resampler.resample(frame):
-        out += f.to_ndarray().tobytes()
-    return out
+    def __init__(self, rate: int):
+        self.rate = rate
+        self._resampler = None
+        self._key = None
+
+    def __call__(self, frame: av.AudioFrame) -> bytes:
+        key = (frame.format.name, frame.layout.name, frame.sample_rate)
+        if self._resampler is None or key != self._key:
+            self._resampler = av.AudioResampler(format="s16", layout="mono", rate=self.rate)
+            self._key = key
+        out = b""
+        for f in self._resampler.resample(frame):
+            out += f.to_ndarray().tobytes()
+        return out
 
 
 def loudness(pcm: bytes) -> float:
@@ -122,6 +133,7 @@ class Listener:
                  on_audio: Optional[Callable[[bytes], None]] = None):
         self.track = track
         self.on_audio = on_audio   # every 20 ms heard, 16 kHz (call recording), paused or not
+        self._to_listen = ToMono(LISTEN_RATE)
         self.on_utterance = on_utterance
         self.on_barge_in = on_barge_in
         self.paused = False        # while bridged to a person the AI stops listening
@@ -139,7 +151,7 @@ class Listener:
                 frame = await self.track.recv()
             except MediaStreamError:
                 return
-            pcm = to_mono(frame, LISTEN_RATE)
+            pcm = self._to_listen(frame)
             if self.on_audio is not None:
                 self.on_audio(pcm)
             if self.paused:
@@ -240,3 +252,33 @@ def recording_bytes(caller: bytes, business: bytes, rate: int = LISTEN_RATE) -> 
         for packet in stream.encode(None):
             container.mux(packet)
     return out.getvalue()
+
+
+def split_speech(pcm: bytes, rate: int = LISTEN_RATE, end_silence: float = 0.7, min_speech: float = 0.4,
+                 max_len: float = 25.0) -> list:
+    """
+    One side of a recorded call cut into what was said, by loudness: [(start_seconds, pcm), ...].
+    Used after the call to transcribe the part a person handled (call_service.learn_from_call).
+    """
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    step = rate // 50                                   # 20 ms
+    if a.size < step:
+        return []
+    levels = np.sqrt(np.mean(a[: a.size // step * step].reshape(-1, step) ** 2, axis=1))
+    noise = float(np.percentile(levels, 20)) if levels.size else 0.0
+    threshold = max(600.0, noise * 3)
+    out, start, quiet = [], None, 0
+    for i, level in enumerate(levels):
+        loud = level > threshold
+        if start is None:
+            if loud:
+                start, quiet = i, 0
+            continue
+        quiet = 0 if loud else quiet + 1
+        length = (i - start + 1) * 0.02
+        if quiet * 0.02 >= end_silence or length >= max_len or i == len(levels) - 1:
+            end = i + 1 - (quiet if quiet * 0.02 >= end_silence else 0)
+            if (end - start) * 0.02 >= min_speech:
+                out.append((start * 0.02, a[start * step:end * step].astype(np.int16).tobytes()))
+            start = None
+    return out

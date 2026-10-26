@@ -38,7 +38,7 @@ from aiortc.contrib.media import MediaRelay
 from sqlalchemy import select
 
 import llm_router
-from call_audio import Listener, SpeakerTrack, recording_bytes, speech_pcm, wav_bytes
+from call_audio import Listener, SpeakerTrack, recording_bytes, speech_pcm, split_speech, wav_bytes
 from config import settings
 from database import AsyncSessionLocal
 from inbox_service import announce, bot_may_reply, get_conversation, is_manager, mark_needs_human, touch_conversation
@@ -201,6 +201,13 @@ async def ai_reply(tenant_id: int, phone: str, said: str, note: str = "") -> tup
         reply = await generate_bot_reply(system_prompt=tenant.system_prompt, knowledge_base=kb, chat_history=history,
                                          user_message=message, config=config, from_voice=True)
         text, docs = resolve_reply_documents(reply.text, said, config)
+        if reply.unknown:
+            # Learning: a question the documents don't cover goes on the owner's "Questions to
+            # answer" list, as from chat; once answered, the next caller gets the answer.
+            from ai_service import detect_language_intent
+            from learning_service import record_gap
+            await record_gap(db, tenant_id, said, bot_reply=text, language=detect_language_intent(said, history),
+                             customer_phone=phone, source="call")
         for doc in docs:
             if doc and doc.get("url"):
                 try:
@@ -307,8 +314,14 @@ class CallSession:
         self.rec_in = bytearray()
         self.rec_out = bytearray()
         self.recording = role == "customer" and settings.CALL_RECORDING
-        if self.recording:
+        # The audio is also needed to learn from the part a person handled, even with recording off.
+        self.capture = role == "customer" and (settings.CALL_RECORDING or settings.CALL_LEARNING)
+        if self.capture:
             self.speaker.tap = self._record_out
+        # Where a person (team member or manager) talked: [(start s, end s, transcript index, who)].
+        self.team_spans: List[tuple] = []
+        self._span: Optional[tuple] = None
+        self.learning_task: Optional[asyncio.Task] = None
 
         @self.pc.on("track")
         def _on_track(track):
@@ -317,7 +330,7 @@ class CallSession:
             self.remote = track
             if self.role == "customer":
                 self.listener = Listener(self.relay.subscribe(track), self.on_utterance, self.on_barge_in,
-                                         on_audio=self._record_in if self.recording else None)
+                                         on_audio=self._record_in if self.capture else None)
                 self.tasks.append(asyncio.ensure_future(self.listener.run()))
 
         @self.pc.on("connectionstatechange")
@@ -480,8 +493,20 @@ class CallSession:
             await _set_row(db, self.call_row_id, status="with_team")
         return True
 
+    def _recorded_seconds(self) -> float:
+        return len(self.rec_out) / 2 / 16_000
+
+    def _close_span(self) -> None:
+        if self._span is not None:
+            start, index, who = self._span
+            self.team_spans.append((start, self._recorded_seconds(), index, who))
+            self._span = None
+
     def join(self, leg: "CallSession") -> None:
         """Customer <-> manager: each hears the other; the AI stops listening."""
+        if self.role == "customer" and self._span is None:
+            who = self.taken_by or ("Manager" if leg.role == "manager" else "Team")
+            self._span = (self._recorded_seconds(), len(self.transcript), who)
         self.partner, leg.partner = leg, self
         if self.listener:
             self.listener.paused = True
@@ -495,12 +520,14 @@ class CallSession:
         """A person in the website takes this call (answered it ringing, took it over from the AI, or placed it)."""
         self.handed_over = True
         self.taken_by = who
+        self._span = None if self._span is None else (self._span[0], self._span[1], who)
         self.join(leg)
         async with AsyncSessionLocal() as db:
             await _set_row(db, self.call_row_id, status="with_team", answered_by=who)
 
     async def unjoin(self) -> None:
         """The manager hung up but the customer is still there: the AI picks up again."""
+        self._close_span()
         self.partner = None
         self.speaker.forward = None
         self.handed_over = False
@@ -589,6 +616,7 @@ class CallSession:
             self.logged.set()
             return
 
+        self._close_span()
         recording = await self._save_recording()
         final = status or ("completed" if self.answered.is_set() else "missed")
         summary = await summarise(self.transcript)
@@ -603,6 +631,11 @@ class CallSession:
                 row.summary = summary
                 row.recording_url = recording
                 await db.commit()
+        if settings.CALL_LEARNING and self.team_spans:
+            # After the reply to Meta: transcribe the person's part and learn from it.
+            self.learning_task = asyncio.ensure_future(learn_from_call(
+                self.tenant_id, self.call_row_id, self.phone, bytes(self.rec_in), bytes(self.rec_out),
+                list(self.team_spans), list(self.transcript), self.language))
         self.logged.set()
         await announce(self.tenant_id, self.phone, kind="calls.changed")
 
@@ -628,6 +661,120 @@ async def _language_of(db, tenant_id: int, phone: str) -> str:
         ChatHistory.tenant_id == tenant_id, ChatHistory.customer_phone_number == phone, ChatHistory.role == "user")
         .order_by(ChatHistory.id.desc()).limit(4))).scalars().all()
     return detect_language_intent(" ".join(reversed(rows))) if rows else "english"
+
+
+# ---------------------------------------------------------------------------
+# Learning from calls a person handled
+# ---------------------------------------------------------------------------
+#
+# The AI's own turns are written down as it speaks; when a team member or the manager takes over,
+# nobody writes anything. Afterwards, the recording of that part is cut into what each side said
+# and transcribed, so (1) the call's transcript and the chat history are complete - the chat bot
+# knows what the team promised - and (2) general facts the person gave ("we open 8 to 9", "delivery
+# to Kandy is Rs 450") become SUGGESTED answers on the owner's "Questions to answer" list. They are
+# used only after the owner checks and saves them: a person on the phone can be wrong, or say
+# something meant for this one customer only, and the bot must not repeat that to everyone.
+
+LEARN_PROMPT = (
+    "Below is a phone call between a customer and a staff member of a business. Find questions the customer "
+    "asked that the staff member answered with a GENERAL fact about the business that would help answer other "
+    "customers too: opening hours, prices, delivery areas and fees, payment methods, policies, what products or "
+    "services exist. Leave out anything about this customer only (their order, booking, address, name, phone, "
+    "complaint), promises, and anything the staff member was unsure about. Write each question as a customer "
+    "would ask it and the answer as a short factual sentence, in English. "
+    'JSON only: {"learned": [{"question": "...", "answer": "..."}]} - an empty list if there is nothing.'
+)
+_PERSONAL = re.compile(r"\+?\d[\d\s-]{7,}\d|@[a-z0-9-]+\.[a-z]|\b(order|booking)\s*(no\.?|number|#)\s*\w+", re.I)
+MAX_LEARNED = 5
+MAX_PIECES = 60
+
+
+async def _transcribe_pieces(pieces: List[tuple], business: str, words: List[str]) -> List[tuple]:
+    """[(start, pcm)] -> [(start, text)], a few at a time."""
+    from voice_service import understand_voice_note
+    gate = asyncio.Semaphore(3)
+
+    async def one(start, pcm):
+        async with gate:
+            heard = await understand_voice_note(wav_bytes(pcm), "audio/wav", business, words)
+        return (start, heard.text.strip()) if heard.status == "ok" and heard.text.strip() else None
+
+    done = await asyncio.gather(*(one(st, pcm) for st, pcm in pieces[:MAX_PIECES]))
+    return [d for d in done if d]
+
+
+async def learn_from_call(tenant_id: int, call_row_id: int, phone: str, rec_in: bytes, rec_out: bytes,
+                          spans: List[tuple], transcript: List[Dict], language: str) -> List[dict]:
+    """Transcribe the part(s) a person handled; complete the transcript and history; suggest answers."""
+    from learning_service import suggest
+    from voice_service import business_words
+    learned: List[dict] = []
+    try:
+        async with AsyncSessionLocal() as db:
+            tenant = await db.get(Tenant, tenant_id)
+            words = await business_words(db, tenant)
+        business = tenant.business_name or ""
+        bps = 2 * 16_000                                      # bytes per second, 16 kHz s16 mono
+        added: List[tuple] = []                               # (transcript index, [turns])
+        for start, end, index, who in spans:
+            a, b = int(start * bps) & ~1, int(end * bps) & ~1
+            customer = [(start + t, "customer", pcm) for t, pcm in split_speech(rec_in[a:b])]
+            person = [(start + t, "team", pcm) for t, pcm in split_speech(rec_out[a:b])]
+            pieces = sorted(customer + person, key=lambda x: x[0])
+            heard = await _transcribe_pieces([(t, pcm) for t, _, pcm in pieces], business, words)
+            side = {t: w for t, w, _ in pieces}
+            turns = [{"who": side[t], "text": text, "by": who if side[t] == "team" else None}
+                     for t, text in sorted(heard)]
+            if turns:
+                added.append((index, turns))
+        if not added:
+            return []
+
+        full = list(transcript)
+        for index, turns in sorted(added, key=lambda x: x[0], reverse=True):
+            full[index:index] = turns
+        async with AsyncSessionLocal() as db:
+            conv = await touch_conversation(db, tenant_id, phone)
+            for _, turns in sorted(added, key=lambda x: x[0]):
+                for t in turns:
+                    agent = t["who"] == "team"
+                    db.add(ChatHistory(tenant_id=tenant_id, customer_phone_number=phone,
+                                       role="assistant" if agent else "user", content="📞 " + t["text"],
+                                       sender="agent" if agent else "customer", message_type="call",
+                                       status="SENT" if agent else "RECEIVED"))
+                    conv.message_count = (conv.message_count or 0) + 1
+            row = await db.get(Call, call_row_id)
+            if row is not None:
+                row.transcript = json.dumps(full, ensure_ascii=False)
+                row.summary = await summarise(full) or row.summary
+            await db.commit()
+        await announce(tenant_id, phone, kind="calls.changed")
+        await announce(tenant_id, phone)
+
+        if not llm_router.role_candidates("fast"):
+            return []
+        said = "\n".join(f"{'Staff' if t['who'] != 'customer' else 'Customer'}: {t['text']}" for t in full)
+        data, _ = await llm_router.complete_json("fast", [{"role": "system", "content": LEARN_PROMPT},
+                                                          {"role": "user", "content": said[-8000:]}],
+                                                 max_tokens=500, temperature=0.0, timeout=30)
+        for item in ((data or {}).get("learned") or [])[:MAX_LEARNED] if isinstance(data, dict) else []:
+            q, ans = str((item or {}).get("question", "")).strip(), str((item or {}).get("answer", "")).strip()
+            if not q or not ans or _PERSONAL.search(q + " " + ans):
+                continue                                      # about this customer only: not for everyone
+            async with AsyncSessionLocal() as db:
+                gap = await suggest(db, tenant_id, q, ans, language=language, customer_phone=phone, source="call")
+            if gap is not None:
+                learned.append({"question": q, "answer": ans, "gap_id": gap.id})
+        if learned:
+            from realtime import inbox_manager
+            try:
+                await inbox_manager.broadcast(tenant_id, {"type": "learning.suggested", "count": len(learned)})
+            except Exception:  # noqa: BLE001
+                pass
+        return learned
+    except Exception:  # noqa: BLE001 - learning must never break anything else
+        logger.exception("[call] learning from the call failed")
+        return learned
 
 
 # ---------------------------------------------------------------------------

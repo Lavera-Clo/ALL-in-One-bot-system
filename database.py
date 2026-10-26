@@ -111,6 +111,7 @@ _COLUMN_MIGRATIONS = [
     ("tenants", "catalog_error", "TEXT"),
     ("calls", "answered_by", "VARCHAR(150)"),
     ("calls", "recording_url", "TEXT"),
+    ("knowledge_gaps", "suggested_answer", "TEXT"),
 ]
 
 # Indexes for columns added by migration (create_all only indexes brand-new tables).
