@@ -794,17 +794,6 @@ async def _language_of(db, tenant_id: int, phone: str) -> str:
 # used only after the owner checks and saves them: a person on the phone can be wrong, or say
 # something meant for this one customer only, and the bot must not repeat that to everyone.
 
-LEARN_PROMPT = (
-    "Below is a phone call between a customer and a staff member of a business. Find questions the customer "
-    "asked that the staff member answered with a GENERAL fact about the business that would help answer other "
-    "customers too: opening hours, prices, delivery areas and fees, payment methods, policies, what products or "
-    "services exist. Leave out anything about this customer only (their order, booking, address, name, phone, "
-    "complaint), promises, and anything the staff member was unsure about. Write each question as a customer "
-    "would ask it and the answer as a short factual sentence, in English. "
-    'JSON only: {"learned": [{"question": "...", "answer": "..."}]} - an empty list if there is nothing.'
-)
-_PERSONAL = re.compile(r"\+?\d[\d\s-]{7,}\d|@[a-z0-9-]+\.[a-z]|\b(order|booking)\s*(no\.?|number|#)\s*\w+", re.I)
-MAX_LEARNED = 5
 MAX_PIECES = 60
 
 
@@ -825,7 +814,6 @@ async def _transcribe_pieces(pieces: List[tuple], business: str, words: List[str
 async def learn_from_call(tenant_id: int, call_row_id: int, phone: str, rec_in: bytes, rec_out: bytes,
                           spans: List[tuple], transcript: List[Dict], language: str) -> List[dict]:
     """Transcribe the part(s) a person handled; complete the transcript and history; suggest answers."""
-    from learning_service import suggest
     from voice_service import business_words
     learned: List[dict] = []
     try:
@@ -870,26 +858,9 @@ async def learn_from_call(tenant_id: int, call_row_id: int, phone: str, rec_in: 
         await announce(tenant_id, phone, kind="calls.changed")
         await announce(tenant_id, phone)
 
-        if not llm_router.role_candidates("fast"):
-            return []
-        said = "\n".join(f"{'Staff' if t['who'] != 'customer' else 'Customer'}: {t['text']}" for t in full)
-        data, _ = await llm_router.complete_json("fast", [{"role": "system", "content": LEARN_PROMPT},
-                                                          {"role": "user", "content": said[-8000:]}],
-                                                 max_tokens=500, temperature=0.0, timeout=30)
-        for item in ((data or {}).get("learned") or [])[:MAX_LEARNED] if isinstance(data, dict) else []:
-            q, ans = str((item or {}).get("question", "")).strip(), str((item or {}).get("answer", "")).strip()
-            if not q or not ans or _PERSONAL.search(q + " " + ans):
-                continue                                      # about this customer only: not for everyone
-            async with AsyncSessionLocal() as db:
-                gap = await suggest(db, tenant_id, q, ans, language=language, customer_phone=phone, source="call")
-            if gap is not None:
-                learned.append({"question": q, "answer": ans, "gap_id": gap.id})
-        if learned:
-            from realtime import inbox_manager
-            try:
-                await inbox_manager.broadcast(tenant_id, {"type": "learning.suggested", "count": len(learned)})
-            except Exception:  # noqa: BLE001
-                pass
+        from learning_service import learn_from_conversation
+        learned = await learn_from_conversation(tenant_id, full, customer_phone=phone, language=language,
+                                                source="call", kind="phone call")
         return learned
     except Exception:  # noqa: BLE001 - learning must never break anything else
         logger.exception("[call] learning from the call failed")

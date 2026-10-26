@@ -67,12 +67,13 @@ from schemas import (
     TeachRequest,
     SignupRequest,
     WhatsAppConnectRequest,
-    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect, BrowserCallOffer, TeamDial,
+    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect, BrowserCallOffer, TeamDial, WebsiteTrain,
     ChatBotUpdate,
     BusinessBotUpdate,
     ManualOrderCreate,
 )
-from learning_service import answer_gap, dismiss_gap, gap_payload, get_gap, list_gaps, record_gap, teach
+from learning_service import (answer_gap, dismiss_gap, gap_payload, get_gap, learn_from_past_chats, list_gaps,
+                              record_gap, teach, teach_many)
 from self_test_service import recover_interrupted_runs, run_payload, run_self_test, start_run as start_test_run
 from understanding_service import (
     PLACEHOLDER_PROMPT_START, recover_interrupted as recover_interrupted_understanding, understand_business,
@@ -1279,6 +1280,7 @@ from document_service import (
 )
 import llm_router
 import call_service
+import training_sources
 from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
 from tenant_config import build_bot_config, parse_quick_menu
 from industry_brain import CONTACT_BUTTON_ID, INDUSTRY_CHOICES, button_phrase, get_pack
@@ -1469,6 +1471,102 @@ async def upload_tenant_document(
         "message": f"'{document.title}' uploaded. Training has started — it usually takes 1-3 minutes.",
         "document": _document_payload(document),
     }
+
+
+@app.post("/api/tenants/{tenant_id}/documents/website", tags=["Bot Portal"])
+async def train_from_website(tenant_id: int, payload: WebsiteTrain, background_tasks: BackgroundTasks,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Read the business's website (the home page and up to 7 of its most useful pages: prices, menu,
+    delivery, contact...) and train it like a document.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        site = await training_sources.read_website(payload.url)
+        document = await create_document(db, tenant, pasted_text=site["text"], title=f"Website: {site['title']}"[:255],
+                                         doc_type="knowledge")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.source = "website"
+    document.original_filename = site["url"][:255]
+    await db.commit()
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"Read {len(site['pages'])} page(s) from {site['url']}. Training has started.",
+            "pages": site["pages"], "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/documents/{document_id}/refresh-website", tags=["Bot Portal"])
+async def refresh_website_document(tenant_id: int, document_id: int, background_tasks: BackgroundTasks,
+                                   db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """The website changed (new prices...): read it again and retrain."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    document = (await db.execute(select(TenantDocument).where(
+        TenantDocument.id == document_id, TenantDocument.tenant_id == tenant.id))).scalar_one_or_none()
+    if not document or document.source != "website":
+        raise HTTPException(status_code=404, detail="Website document not found")
+    if document.status in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="This document is already training.")
+    try:
+        site = await training_sources.read_website(document.original_filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.raw_text = site["text"]
+    document.char_count = len(site["text"])
+    document = await queue_retrain(db, document)
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"Read {len(site['pages'])} page(s) again. Retraining.", "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/documents/photos", tags=["Bot Portal"])
+async def train_from_photos(tenant_id: int, background_tasks: BackgroundTasks, files: List[UploadFile] = File(...),
+                            title: Optional[str] = Form(None),
+                            db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Photos of a menu, price board or product list. They become one PDF (a page per photo) that the AI
+    vision readers read - two different models on each page, cross-checking every number.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    photos = [(await f.read(), f.filename or "photo") for f in files]
+    try:
+        pdf = await asyncio.to_thread(training_sources.photos_to_pdf, photos)
+        name = f"photos-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.pdf"
+        document = await create_document(db, tenant, content=pdf, filename=name,
+                                         title=(title or f"Photos ({len(photos)})")[:255], doc_type="knowledge")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.source = "photos"
+    await db.commit()
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"{len(photos)} photo(s) uploaded. The AI is reading them - usually 1-3 minutes.",
+            "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/faq/import", tags=["Bot Learning"])
+async def import_faq(tenant_id: int, file: UploadFile = File(...),
+                     db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """A spreadsheet (.csv or .xlsx): questions in column A, answers in column B. Each row is taught at once."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="The file is over 5 MB.")
+    try:
+        pairs = training_sources.parse_faq(content, file.filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    result = await teach_many(db, tenant, pairs, source="faq")
+    return {"message": f"Taught {result['added']} new answer(s), updated {result['updated']}.", **result}
+
+
+@app.post("/api/tenants/{tenant_id}/learn-from-chats", tags=["Bot Learning"])
+async def learn_from_chats_api(tenant_id: int, background_tasks: BackgroundTasks, days: int = Query(90, ge=1, le=365),
+                               db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Look through chats where your team replied (last `days`): general facts they told customers become
+    suggested answers in "Questions to answer", for you to check and save.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    background_tasks.add_task(learn_from_past_chats, tenant.id, days)
+    return {"message": "Looking through your team's replies. Suggestions appear in 'Questions to answer' in a minute or two."}
 
 
 @app.patch("/api/tenants/{tenant_id}/documents/{document_id}", tags=["Bot Portal"])

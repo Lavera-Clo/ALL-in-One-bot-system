@@ -212,6 +212,8 @@ class Conversation(Base):
     # refreshed in the background; memory_upto_id = the last message it has read.
     memory: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_upto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Learning from the team's replies (learning_service.learn_from_chat): the last message looked at.
+    learned_upto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def display_name(self) -> str:

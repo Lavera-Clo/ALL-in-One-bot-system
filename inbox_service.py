@@ -210,6 +210,10 @@ async def on_whatsapp_sent(phone_number_id: str, recipient: str, text: str, kind
         if sender == "agent" and ok:
             conv.needs_human = False   # a person has answered
         await db.commit()
+        if sender == "agent" and ok and kind == "text":
+            # What they told the customer may be worth teaching the bot (owner approves first).
+            from learning_service import learn_from_chat_later
+            learn_from_chat_later(tenant.id, recipient)
         if ctx is not None:
             ctx["message_id"] = row.id
         await announce(tenant.id, recipient)

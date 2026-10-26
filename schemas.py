@@ -296,6 +296,11 @@ class BotProfileUpdate(BaseModel):
     _check_industry = field_validator("industry")(_industry_key)
 
 
+class WebsiteTrain(BaseModel):
+    """Train the bot from the business's own website."""
+    url: str = Field(..., min_length=4, max_length=500, example="https://www.laveraclo.lk")
+
+
 class TenantDocumentUpdate(BaseModel):
     title: Optional[str] = None
     trigger_keywords: Optional[str] = Field(None, example="price, ganan, mila, rate, cost")
