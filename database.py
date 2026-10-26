@@ -103,6 +103,12 @@ _COLUMN_MIGRATIONS = [
     ("conversations", "changed_us", "BIGINT"),
     ("conversations", "memory", "TEXT"),
     ("conversations", "memory_upto_id", "INTEGER"),
+    ("chat_history", "media_url", "TEXT"),
+    ("chat_history", "media_mime", "VARCHAR(100)"),
+    ("chat_history", "media_name", "VARCHAR(255)"),
+    ("tenants", "wa_catalog_id", "VARCHAR(64)"),
+    ("tenants", "catalog_synced_at", "DATETIME"),
+    ("tenants", "catalog_error", "TEXT"),
 ]
 
 # Indexes for columns added by migration (create_all only indexes brand-new tables).

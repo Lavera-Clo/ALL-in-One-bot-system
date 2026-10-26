@@ -9,3 +9,6 @@ __pycache__/
 uploads/
 static/tenant_docs/
 *.db.bak*
+
+# Photos/videos/documents from WhatsApp chats (media_service.py)
+media_store/

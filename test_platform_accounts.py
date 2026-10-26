@@ -63,6 +63,9 @@ llm_router.role_candidates = lambda role: [("test", "fake")]
 
 CHECKS = ("_get_tenant_or_404(", "ensure_tenant_access(", "can_access(")
 PLATFORM_ONLY = ("require_platform_admin", "require_owner")
+# Public on purpose: the product page each WhatsApp catalogue item links to. Meta and customers
+# must open it without signing in, and it shows only what the catalogue already shows.
+PUBLIC = {"/shop/{tenant_id}/{product_id}"}
 
 
 def test_every_route_checks_ownership():
@@ -70,7 +73,7 @@ def test_every_route_checks_ownership():
     unchecked = []
     for route in main.app.routes:
         path = getattr(route, "path", "")
-        if not any(p in path for p in ("{tenant_id}", "{product_id}", "{order_id}")):
+        if not any(p in path for p in ("{tenant_id}", "{product_id}", "{order_id}")) or path in PUBLIC:
             continue
         source = inspect.getsource(route.endpoint)
         if any(c in source for c in CHECKS) or any(p in source for p in PLATFORM_ONLY):

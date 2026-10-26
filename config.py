@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # A customer who sends a voice note gets a voice note back (then the same reply in text).
     VOICE_REPLIES: bool = os.getenv("VOICE_REPLIES", "true").strip().lower() not in ("0", "false", "no")
 
+    # WhatsApp voice calls (call_service.py): the AI answers calls and can call customers.
+    # Calling needs a newer Graph API than messaging, so it has its own version.
+    CALLS_ENABLED: bool = os.getenv("CALLS_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+    CALLS_GRAPH_API_VERSION: str = os.getenv("CALLS_GRAPH_API_VERSION", "v23.0")
+    CALL_STUN_SERVER: str = os.getenv("CALL_STUN_SERVER", "stun:stun.l.google.com:19302")
+    CALL_MAX_MINUTES: int = int(os.getenv("CALL_MAX_MINUTES", "15"))
+
     # AI providers. Any combination may be set; llm_router.py tries them in order and
     # falls back when one is rate-limited, overloaded or out of quota.
     GEMINI_API_KEY: str = ""

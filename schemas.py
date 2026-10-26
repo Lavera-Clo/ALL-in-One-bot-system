@@ -355,6 +355,35 @@ class BookingUpdate(BaseModel):
     message: Optional[str] = Field(None, max_length=1000)
 
 
+class ShareContact(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    phone: str = Field(..., min_length=5, max_length=30, example="+94771234567")
+
+
+class InboxShare(BaseModel):
+    """Send something other than text or a file: a location, contact cards, the catalogue, products."""
+    type: str = Field(..., example="location")          # location | contacts | catalog | products
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    name: Optional[str] = Field(None, max_length=100)
+    address: Optional[str] = Field(None, max_length=300)
+    contacts: Optional[List[ShareContact]] = None
+    product_ids: Optional[List[int]] = Field(None, max_length=30)
+    text: Optional[str] = Field(None, max_length=1000)
+    client_msg_id: Optional[str] = Field(None, max_length=64)
+
+
+class CatalogConnect(BaseModel):
+    """The catalogue ID from Meta Commerce Manager (Catalogue -> Settings)."""
+    catalog_id: str = Field(..., min_length=5, max_length=40, example="1234567890123456")
+
+
+class CallStart(BaseModel):
+    """Call a customer on WhatsApp. The AI opens with `purpose`."""
+    phone: str = Field(..., example="94771234567")
+    purpose: str = Field(..., min_length=3, max_length=500, example="Your order #12 is ready to collect.")
+
+
 class ChatBotUpdate(BaseModel):
     """Switch the bot on or off for one customer's chat."""
     bot_enabled: bool

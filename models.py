@@ -50,6 +50,11 @@ class Tenant(Base):
     # How many days of messages the shared database keeps (sync_service.py cleans up daily).
     # Contacts and daily message counts are kept regardless.
     history_days: Mapped[int] = mapped_column(Integer, default=21, nullable=False)
+    # WhatsApp catalogue (catalog_service.py): the Meta Commerce catalogue linked to this number.
+    # Products are synced to it, so customers can browse and send a cart from WhatsApp itself.
+    wa_catalog_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    catalog_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    catalog_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -144,6 +149,11 @@ class ChatHistory(Base):
     # sync by ("everything changed after X").
     client_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     changed_us: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # Photos, videos, voice notes, documents and stickers, sent or received (media_service.py):
+    # a copy kept on this server, so the inbox can show it after WhatsApp's own link expires.
+    media_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    media_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="chat_histories")
 
@@ -476,3 +486,30 @@ class Booking(Base):
 
     def __repr__(self) -> str:
         return f"<Booking(id={self.id}, tenant={self.tenant_id}, {self.customer_phone}, {self.status})>"
+
+
+class Call(Base):
+    """
+    A WhatsApp voice call (call_service.py), incoming or outgoing. The AI answers and talks; for
+    complaints, or when the caller asks for a person, it rings the manager and joins the two calls.
+    """
+    __tablename__ = "calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    wa_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)          # incoming | outgoing
+    # awaiting_permission | ringing | in_progress | transferring | with_team | completed | missed | rejected | failed
+    status: Mapped[str] = mapped_column(String(24), default="ringing", nullable=False, index=True)
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)             # outgoing: why we are calling
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON [{"who": "customer|bot|team", "text": ...}]
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transferred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<Call(id={self.id}, tenant={self.tenant_id}, {self.direction} {self.customer_phone}, {self.status})>"
