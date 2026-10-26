@@ -500,12 +500,14 @@ class Call(Base):
     wa_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     direction: Mapped[str] = mapped_column(String(10), nullable=False)          # incoming | outgoing
-    # awaiting_permission | ringing | in_progress | transferring | with_team | completed | missed | rejected | failed
+    # awaiting_permission | allowed | ringing | in_progress | transferring | with_team | completed | missed | rejected | failed
     status: Mapped[str] = mapped_column(String(24), default="ringing", nullable=False, index=True)
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)             # outgoing: why we are calling
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON [{"who": "customer|bot|team", "text": ...}]
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     transferred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    answered_by: Mapped[str | None] = mapped_column(String(150), nullable=True)   # the team member who talked
+    recording_url: Mapped[str | None] = mapped_column(Text, nullable=True)        # OGG, caller left / business right
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)

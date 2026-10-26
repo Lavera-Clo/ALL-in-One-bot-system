@@ -109,6 +109,8 @@ _COLUMN_MIGRATIONS = [
     ("tenants", "wa_catalog_id", "VARCHAR(64)"),
     ("tenants", "catalog_synced_at", "DATETIME"),
     ("tenants", "catalog_error", "TEXT"),
+    ("calls", "answered_by", "VARCHAR(150)"),
+    ("calls", "recording_url", "TEXT"),
 ]
 
 # Indexes for columns added by migration (create_all only indexes brand-new tables).

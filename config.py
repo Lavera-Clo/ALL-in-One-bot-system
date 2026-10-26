@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     CALLS_GRAPH_API_VERSION: str = os.getenv("CALLS_GRAPH_API_VERSION", "v23.0")
     CALL_STUN_SERVER: str = os.getenv("CALL_STUN_SERVER", "stun:stun.l.google.com:19302")
     CALL_MAX_MINUTES: int = int(os.getenv("CALL_MAX_MINUTES", "15"))
+    # Incoming calls ring the team's website first for this long; then the AI answers (0 = AI at once).
+    CALL_TEAM_RING_SECONDS: int = int(os.getenv("CALL_TEAM_RING_SECONDS", "15"))
+    # Keep a recording of each call (the greeting tells callers). false = no recordings.
+    CALL_RECORDING: bool = os.getenv("CALL_RECORDING", "true").strip().lower() not in ("0", "false", "no")
 
     # AI providers. Any combination may be set; llm_router.py tries them in order and
     # falls back when one is rate-limited, overloaded or out of quota.

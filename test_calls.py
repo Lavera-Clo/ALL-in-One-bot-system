@@ -18,6 +18,7 @@ import tempfile
 import time
 
 _TMP = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+os.environ["MEDIA_DIR"] = os.path.join(_TMP.name, "media")
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or "sqlite+aiosqlite:///" + os.path.join(_TMP.name, "calls_test.db").replace("\\", "/")
 
 import av  # noqa: E402
@@ -369,6 +370,7 @@ async def test_outgoing(tenant):
     await asyncio.sleep(1.5)
     phone.talk(CUSTOMER_HZ, 1.0)
     check(await wait_for(lambda: session.ended.is_set(), 12), "'thank you bye' -> the AI answers and hangs up")
+    await asyncio.wait_for(session.logged.wait(), 15)
     async with AsyncSessionLocal() as db:
         row = await db.get(Call, result["call_id"])
     check(row.status == "completed", "logged as completed")
@@ -420,6 +422,186 @@ async def test_outgoing(tenant):
     permission.update({"status": "permanent", "can_call": True, "can_ask": True})
 
 
+broadcasts = []
+
+
+async def fake_broadcast(tenant_id, message):
+    broadcasts.append(message)
+
+
+def channels(ogg: bytes):
+    """(left, right) of a stereo recording, as int16 arrays at 48 kHz."""
+    import io as _io
+    left, right = [], []
+    with av.open(_io.BytesIO(ogg)) as c:
+        rs = av.AudioResampler(format="s16", layout="stereo", rate=48_000)
+        for frame in c.decode(audio=0):
+            for f in rs.resample(frame):
+                a = f.to_ndarray().reshape(-1, 2)
+                left.append(a[:, 0])
+                right.append(a[:, 1])
+    return np.concatenate(left), np.concatenate(right)
+
+
+async def ringing_call(tenant, call_id):
+    """A call that rings the team first: the webhook is still waiting when this returns."""
+    heard_queue.clear()
+    phone = Phone()
+    await phone.pc.setLocalDescription(await phone.pc.createOffer())
+    api_calls.clear()
+    broadcasts.clear()
+    task = asyncio.ensure_future(cs.handle_call_events(tenant, {
+        "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nimal"}}],
+        "calls": [{"id": call_id, "from": CUSTOMER, "event": "connect", "direction": "USER_INITIATED",
+                   "session": {"sdp_type": "offer", "sdp": phone.pc.localDescription.sdp}}]}))
+    await wait_for(lambda: any(b.get("type") == "call.ringing" for b in broadcasts), 5)
+    return phone, task
+
+
+async def connect_caller(phone, task):
+    await asyncio.wait_for(task, 20)
+    accept = next(b for b in api_calls if b.get("action") == "accept")
+    await phone.pc.setRemoteDescription(RTCSessionDescription(accept["session"]["sdp"], "answer"))
+
+
+async def browser_offer():
+    browser = Phone()
+    await browser.pc.setLocalDescription(await browser.pc.createOffer())
+    return browser
+
+
+async def test_team(tenant):
+    print("\nIncoming call rings the team's website first")
+    settings.CALL_TEAM_RING_SECONDS = 6
+    phone, task = await ringing_call(tenant, "wacid.team.1")
+    ring = next(b for b in broadcasts if b.get("type") == "call.ringing")
+    check(ring["phone"] == CUSTOMER and ring["name"] == "Nimal" and ring["seconds"] == 6, "every open website is told who is calling")
+    check([b["action"] for b in api_calls] == ["pre_accept"], "the call isn't picked up yet: the customer hears it ringing")
+    row = await row_for("wacid.team.1")
+    browser = await browser_offer()
+    answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+    await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+    await connect_caller(phone, task)
+    check(api_calls[-1]["action"] == "accept", "Answer pressed -> WhatsApp call accepted at once")
+    session = cs._sessions["wacid.team.1"]
+    await asyncio.sleep(0.8)
+    browser.talk(MANAGER_HZ, 2.0)
+    check(await phone.hears(MANAGER_HZ), "the customer hears the person in the website")
+    phone.talk(CUSTOMER_HZ, 2.0)
+    check(await browser.hears(CUSTOMER_HZ), "the website hears the customer")
+    check(not any(t["who"] == "bot" for t in session.transcript), "the AI says nothing")
+    row = await row_for("wacid.team.1")
+    check(row.status == "with_team" and row.answered_by == "Kasun", "logged: answered by Kasun")
+    other = await browser_offer()
+    try:
+        await cs.team_answer(tenant, row.id, other.pc.localDescription.sdp, "Ruwan")
+        check(False, "second answer")
+    except ValueError as e:
+        check("Kasun" in str(e), "a second person pressing Answer is told Kasun already has it")
+    await other.close()
+    await asyncio.sleep(1.0)
+    async with AsyncSessionLocal() as db:
+        await cs.hang_up_call(db, tenant.id, row.id)
+    check(api_calls[-1] == {"call_id": "wacid.team.1", "action": "terminate"}, "Hang up in the website ends the WhatsApp call")
+    row = await row_for("wacid.team.1")
+    check(row.status == "completed" and row.recording_url and row.recording_url.endswith(".ogg"), "the call is kept with a recording")
+    name = row.recording_url.rsplit("/", 1)[1]
+    with open(os.path.join(os.environ["MEDIA_DIR"], name), "rb") as f:
+        left, right = channels(f.read())
+    check(len(left) / 48_000 > 2.0, f"the recording has the whole call ({len(left) / 48_000:.1f} s)")
+    check(abs(main_hz(left.tobytes()) - CUSTOMER_HZ) < 40 and abs(main_hz(right.tobytes()) - MANAGER_HZ) < 40,
+          "left = the customer, right = the team member")
+    await phone.close()
+    await browser.close()
+
+    print("\nNobody answers: the AI picks up")
+    settings.CALL_TEAM_RING_SECONDS = 2
+    phone, task = await ringing_call(tenant, "wacid.team.2")
+    await connect_caller(phone, task)
+    check(await phone.hears(BOT_HZ), "after the ring time the AI answers")
+    session = cs._sessions["wacid.team.2"]
+    check("may be recorded" in session.transcript[0]["text"], "and its greeting says the call may be recorded")
+
+    print("\nTaking over a call the AI is on")
+    row = await row_for("wacid.team.2")
+    browser = await browser_offer()
+    answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+    await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+    await asyncio.sleep(0.8)
+    browser.talk(MANAGER_HZ, 2.0)
+    check(await phone.hears(MANAGER_HZ), "a person takes over mid-call")
+    check(session.listener.paused, "the AI stops listening")
+    print("\nThe website drops (closed tab, lost Wi-Fi)")
+    await cs._agent_legs[row.id].finish()
+    check(await wait_for(lambda: session.partner is None and not session.listener.paused, 3), "the AI takes the caller back")
+    await session.hang_up()
+    await phone.close()
+    await browser.close()
+
+    print("\nLet the AI answer")
+    settings.CALL_TEAM_RING_SECONDS = 30
+    phone, task = await ringing_call(tenant, "wacid.team.3")
+    row = await row_for("wacid.team.3")
+    t0 = time.monotonic()
+    check(await cs.let_ai_answer(tenant, row.id), "'Let the AI answer' pressed")
+    await connect_caller(phone, task)
+    check(time.monotonic() - t0 < 3, "the AI picks up straight away, without the 30 s wait")
+    await cs._sessions["wacid.team.3"].hang_up()
+    await phone.close()
+
+    print("\nThe caller hangs up while it rings")
+    settings.CALL_TEAM_RING_SECONDS = 6
+    phone, task = await ringing_call(tenant, "wacid.team.4")
+    await cs.handle_call_events(tenant, {"calls": [{"id": "wacid.team.4", "event": "terminate", "status": "COMPLETED"}]})
+    await asyncio.wait_for(task, 10)
+    check(not any(b.get("action") == "accept" for b in api_calls), "it is never accepted")
+    check((await row_for("wacid.team.4")).status == "missed", "logged as missed")
+    await phone.close()
+
+    print("\nThe team calls a customer from the website")
+    settings.CALL_TEAM_RING_SECONDS = 0
+    manager_phone["customer_out"] = None
+    browser = await browser_offer()
+    async with AsyncSessionLocal() as db:
+        t = await db.get(Tenant, tenant.id)
+        result = await cs.team_dial(db, t, "+" + CUSTOMER, browser.pc.localDescription.sdp, "Kasun")
+    check(result["status"] == "ringing" and result["sdp"], "it rings, and the website gets its audio answer")
+    await browser.pc.setRemoteDescription(RTCSessionDescription(result["sdp"], "answer"))
+    check(await wait_for(lambda: manager_phone.get("customer_out") is not None, 6), "the customer picks up")
+    customer = manager_phone["customer_out"]
+    session = next(v for v in cs._sessions.values() if v.call_row_id == result["call_id"])
+    check(await wait_for(lambda: session.partner is not None, 6), "joined to the website")
+    await asyncio.sleep(0.8)
+    browser.talk(MANAGER_HZ, 5.0)
+    check(await customer.hears(MANAGER_HZ), "the customer hears the team member")
+    customer.talk(CUSTOMER_HZ, 5.0)
+    check(await browser.hears(CUSTOMER_HZ), "and the team member hears them")
+    check(not session.transcript, "no AI opening line")
+    async with AsyncSessionLocal() as db:
+        row = await db.get(Call, result["call_id"])
+    check(row.direction == "outgoing" and row.status == "with_team" and row.answered_by == "Kasun", "logged as Kasun's outgoing call")
+    await session.hang_up()
+    await customer.close()
+    await browser.close()
+
+    print("\nThe team calls someone who hasn't allowed calls")
+    permission.update({"status": "no_permission", "can_call": False, "can_ask": True})
+    permission_requests.clear()
+    n_connect = sum(1 for b in api_calls if b.get("action") == "connect")
+    browser = await browser_offer()
+    async with AsyncSessionLocal() as db:
+        t = await db.get(Tenant, tenant.id)
+        result = await cs.team_dial(db, t, CUSTOMER, browser.pc.localDescription.sdp, "Kasun")
+    check(result["status"] == "awaiting_permission" and permission_requests, "asked to allow calls first")
+    await cs.handle_permission_reply(tenant, CUSTOMER, {"response": "accept"})
+    async with AsyncSessionLocal() as db:
+        row = await db.get(Call, result["call_id"])
+    check(row.status == "allowed" and sum(1 for b in api_calls if b.get("action") == "connect") == n_connect,
+          "they accept -> marked 'allowed', not dialled without the person (they press Call again)")
+    permission.update({"status": "permanent", "can_call": True, "can_ask": True})
+    await browser.close()
+
+
 async def test_portal(tenant):
     print("\nPortal")
     async with AsyncSessionLocal() as db:
@@ -444,6 +626,7 @@ async def test_portal(tenant):
 
 async def main_async():
     settings.CALL_STUN_SERVER = ""          # local test: no internet needed
+    settings.CALL_TEAM_RING_SECONDS = 0     # the AI-only checks; test_team rings the team
     cs.calls_api = fake_calls_api
     cs.call_permission = fake_permission
     cs.ask_permission = fake_ask
@@ -453,6 +636,8 @@ async def main_async():
     voice_service.understand_voice_note = fake_hear
     voice_service.business_words = fake_words
     llm_router.role_candidates = lambda role: []
+    import realtime
+    realtime.inbox_manager.broadcast = fake_broadcast
 
     await init_db()
     async with AsyncSessionLocal() as db:
@@ -466,6 +651,7 @@ async def main_async():
     await test_transfer(t)
     await test_transfer_unanswered(t)
     await test_outgoing(t)
+    await test_team(t)
     await test_portal(t)
     for s in list(cs._sessions.values()):
         await s.finish()

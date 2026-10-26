@@ -32,12 +32,13 @@ from datetime import timedelta
 from typing import Dict, List, Optional
 
 import httpx
+import numpy as np
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from sqlalchemy import select
 
 import llm_router
-from call_audio import Listener, SpeakerTrack, speech_pcm, wav_bytes
+from call_audio import Listener, SpeakerTrack, recording_bytes, speech_pcm, wav_bytes
 from config import settings
 from database import AsyncSessionLocal
 from inbox_service import announce, bot_may_reply, get_conversation, is_manager, mark_needs_human, touch_conversation
@@ -76,8 +77,8 @@ def _sinhala(language: str) -> bool:
 
 
 LINES = {
-    "greet": ("Hello, thank you for calling {business}. How can I help you?",
-              "ආයුබෝවන්, {business} වෙත කතා කළාට ස්තූතියි. මම ඔබට උදව් කරන්නේ කොහොමද?"),
+    "greet": ("Hello, thank you for calling {business}. This call may be recorded. How can I help you?",
+              "ආයුබෝවන්, {business} වෙත කතා කළාට ස්තූතියි. මෙම ඇමතුම පටිගත විය හැක. මම ඔබට උදව් කරන්නේ කොහොමද?"),
     "hold": ("One moment please, I'm connecting you to our team.",
              "පොඩ්ඩක් ඉන්න, මම ඔබව අපේ කණ්ඩායමට සම්බන්ධ කරනවා."),
     "callback": ("Sorry, our team can't take the call right now. I've passed your message on and they will call you back soon.",
@@ -255,6 +256,7 @@ async def summarise(transcript: List[Dict]) -> str:
 # ---------------------------------------------------------------------------
 
 _sessions: Dict[str, "CallSession"] = {}
+_agent_legs: Dict[int, "CallSession"] = {}      # call row id -> the website leg joined to it
 
 
 def _rtc() -> RTCPeerConnection:
@@ -289,12 +291,24 @@ class CallSession:
         self.transcript: List[Dict] = []
         self.turn_lock = asyncio.Lock()
         self.answered = asyncio.Event()
-        self.ended = asyncio.Event()
+        self.ended = asyncio.Event()       # hung up (set first thing)
+        self.logged = asyncio.Event()      # ...and the call log, summary and recording are saved
         self.partner: Optional["CallSession"] = None     # the other leg once joined
         self.waiting_for: Optional["CallSession"] = None  # manager leg -> the customer it is for
         self.handed_over = False
         self.missed_turns = 0
         self.hang_up_after_speaking = False
+        # A person on the team in the website (role "agent" leg): who took the call, and for a call
+        # the team placed, the browser leg waiting for the customer to pick up.
+        self.taken_by: Optional[str] = None
+        self.pending_agent: Optional["CallSession"] = None
+        self.ring_decided = asyncio.Event()     # incoming: the team answered, or let the AI take it
+        # Recording: the caller (left) and what they heard (right), 16 kHz, both 20 ms at a time.
+        self.rec_in = bytearray()
+        self.rec_out = bytearray()
+        self.recording = role == "customer" and settings.CALL_RECORDING
+        if self.recording:
+            self.speaker.tap = self._record_out
 
         @self.pc.on("track")
         def _on_track(track):
@@ -302,13 +316,38 @@ class CallSession:
                 return
             self.remote = track
             if self.role == "customer":
-                self.listener = Listener(self.relay.subscribe(track), self.on_utterance, self.on_barge_in)
+                self.listener = Listener(self.relay.subscribe(track), self.on_utterance, self.on_barge_in,
+                                         on_audio=self._record_in if self.recording else None)
                 self.tasks.append(asyncio.ensure_future(self.listener.run()))
 
         @self.pc.on("connectionstatechange")
         async def _on_state():
             if self.pc.connectionState in ("failed", "closed"):
                 await self.finish("failed" if self.pc.connectionState == "failed" and not self.answered.is_set() else None)
+
+    # --- recording -----------------------------------------------------------
+
+    def _room(self) -> bool:
+        return len(self.rec_in) < settings.CALL_MAX_MINUTES * 60 * 16_000 * 2 + 640_000
+
+    def _record_in(self, pcm16k: bytes) -> None:
+        if self.answered.is_set() and self._room():
+            self.rec_in.extend(pcm16k)
+
+    def _record_out(self, pcm48k: bytes) -> None:
+        if self.answered.is_set() and self._room():
+            self.rec_out.extend(np.frombuffer(pcm48k, dtype=np.int16)[::3].tobytes())
+
+    async def _save_recording(self) -> Optional[str]:
+        if not self.recording or len(self.rec_in) + len(self.rec_out) < 16_000:   # under ~0.5 s: nothing to keep
+            return None
+        try:
+            from media_service import save_file
+            audio = await asyncio.to_thread(recording_bytes, bytes(self.rec_in), bytes(self.rec_out))
+            return save_file(audio, "audio/ogg", "call.ogg") if audio else None
+        except Exception:  # noqa: BLE001 - a lost recording must not lose the call log
+            logger.exception("[call] could not save the recording")
+            return None
 
     # --- speaking ------------------------------------------------------------
 
@@ -452,6 +491,14 @@ class CallSession:
         if self.remote is not None:
             leg.speaker.forward = self.relay.subscribe(self.remote)
 
+    async def join_team(self, leg: "CallSession", who: str) -> None:
+        """A person in the website takes this call (answered it ringing, took it over from the AI, or placed it)."""
+        self.handed_over = True
+        self.taken_by = who
+        self.join(leg)
+        async with AsyncSessionLocal() as db:
+            await _set_row(db, self.call_row_id, status="with_team", answered_by=who)
+
     async def unjoin(self) -> None:
         """The manager hung up but the customer is still there: the AI picks up again."""
         self.partner = None
@@ -469,10 +516,19 @@ class CallSession:
         """They picked up (or we picked up): say the first line, start the clock."""
         self.answered.set()
         async with AsyncSessionLocal() as db:
-            await _set_row(db, self.call_row_id, status="in_progress", started_at=utc_now())
+            await _set_row(db, self.call_row_id, status="with_team" if self.partner else "in_progress",
+                           started_at=utc_now())
         self.tasks.append(asyncio.ensure_future(self._time_limit()))
         if self.role == "manager":
             return
+        if self.pending_agent is not None:
+            # The team placed this call from the website: they talk, not the AI.
+            leg, self.pending_agent = self.pending_agent, None
+            if not leg.ended.is_set():
+                await self.join_team(leg, self.taken_by or "Team")
+                return
+        if self.taken_by:
+            return                         # a person answered it ringing: already joined
         if self.direction == "outgoing":
             await self.say(await opening_line(self.business, self.purpose, self.language))
         else:
@@ -518,15 +574,22 @@ class CallSession:
         if self.wa_call_id:
             _sessions.pop(self.wa_call_id, None)
 
+        if self.pending_agent is not None:          # the team rang, nobody picked up
+            await self.pending_agent.finish()
+            self.pending_agent = None
+        if self.role == "customer":
+            _agent_legs.pop(self.call_row_id, None)
         partner, self.partner = self.partner, None
         if partner is not None and not partner.ended.is_set():
             if partner.role == "customer":
                 await partner.unjoin()
             else:
                 await partner.hang_up()
-        if self.role == "manager":
+        if self.role in ("manager", "agent"):
+            self.logged.set()
             return
 
+        recording = await self._save_recording()
         final = status or ("completed" if self.answered.is_set() else "missed")
         summary = await summarise(self.transcript)
         async with AsyncSessionLocal() as db:
@@ -538,7 +601,9 @@ class CallSession:
                     row.duration_seconds = int((row.ended_at - _aware(row.started_at)).total_seconds())
                 row.transcript = json.dumps(self.transcript, ensure_ascii=False)
                 row.summary = summary
+                row.recording_url = recording
                 await db.commit()
+        self.logged.set()
         await announce(self.tenant_id, self.phone, kind="calls.changed")
 
 
@@ -689,10 +754,13 @@ async def handle_permission_reply(tenant: Tenant, phone: str, reply: dict) -> No
             row.status = "failed"
         if not accepted:
             newest.status = "rejected"
+        elif not newest.purpose:
+            # A call the team placed from the website: tell them, they press Call again (they must be there).
+            newest.status = "allowed"
         await db.commit()
         await announce(tenant.id, phone, kind="calls.changed")
         purpose, row_id = newest.purpose or "", newest.id
-    if accepted:
+    if accepted and purpose:
         try:
             await dial(tenant, phone, purpose=purpose, call_row_id=row_id)
         except Exception as exc:  # noqa: BLE001
@@ -726,6 +794,17 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
         await session.pc.setLocalDescription(answer)
         sdp = session.pc.localDescription.sdp
         await calls_api(tenant, {"call_id": call_id, "action": "pre_accept", "session": {"sdp_type": "answer", "sdp": sdp}})
+        # The team's websites ring first; whoever presses Answer takes it. Nobody within
+        # CALL_TEAM_RING_SECONDS (or "Let the AI answer") -> the AI picks up.
+        if settings.CALL_TEAM_RING_SECONDS > 0:
+            await ring_team(tenant.id, row_id, phone, name)
+            try:
+                await asyncio.wait_for(session.ring_decided.wait(), timeout=settings.CALL_TEAM_RING_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            session.ring_decided.set()
+            if session.ended.is_set():
+                return                      # they hung up while it rang
         await calls_api(tenant, {"call_id": call_id, "action": "accept", "session": {"sdp_type": "answer", "sdp": sdp},
                                  "biz_opaque_callback_data": f"call:{row_id}"})
     except Exception:
@@ -752,6 +831,100 @@ async def _close_row(tenant: Tenant, call_id: str, event: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The team, talking from the website (Business Sender, cloai.site)
+# ---------------------------------------------------------------------------
+#
+# The browser makes its own WebRTC connection to this server (microphone and speaker); this server
+# joins it to the WhatsApp call exactly as it joins the manager's phone: each side hears the other.
+# The browser sends its SDP offer once its ICE candidates are gathered, and gets the answer back.
+
+async def ring_team(tenant_id: int, call_row_id: int, phone: str, name: Optional[str]) -> None:
+    from realtime import inbox_manager
+    try:
+        await inbox_manager.broadcast(tenant_id, {"type": "call.ringing", "call_id": call_row_id, "phone": phone,
+                                                  "name": name or "", "seconds": settings.CALL_TEAM_RING_SECONDS})
+    except Exception:  # noqa: BLE001
+        logger.exception("[call] could not ring the team")
+
+
+def _customer_session(call_row_id: int) -> Optional[CallSession]:
+    return next((s for s in _sessions.values()
+                 if s.call_row_id == call_row_id and s.role == "customer" and not s.ended.is_set()), None)
+
+
+async def _browser_leg(tenant: Tenant, phone: str, call_row_id: int, offer_sdp: str) -> CallSession:
+    leg = CallSession(tenant, phone, "browser", call_row_id, role="agent")
+    try:
+        await leg.pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        await leg.pc.setLocalDescription(await leg.pc.createAnswer())
+    except Exception as exc:
+        await leg.finish()
+        raise ValueError(f"The browser's audio offer wasn't usable: {exc}")
+    leg.answered.set()
+    return leg
+
+
+async def team_answer(tenant: Tenant, call_row_id: int, offer_sdp: str, who: str) -> str:
+    """Answer a ringing call, or take over a call the AI is on. Returns the browser's SDP answer."""
+    session = _customer_session(call_row_id)
+    if session is None or session.tenant_id != tenant.id:
+        raise LookupError("This call has ended.")
+    if session.partner is not None:
+        raise ValueError(f"{session.taken_by or 'Someone'} is already on this call.")
+    leg = await _browser_leg(tenant, session.phone, call_row_id, offer_sdp)
+    session.ring_decided.set()
+    session.speaker.stop_talking()
+    await session.join_team(leg, who)
+    _agent_legs[call_row_id] = leg
+    return leg.pc.localDescription.sdp
+
+
+async def let_ai_answer(tenant: Tenant, call_row_id: int) -> bool:
+    session = _customer_session(call_row_id)
+    if session is None or session.tenant_id != tenant.id:
+        return False
+    session.ring_decided.set()
+    return True
+
+
+async def team_dial(db, tenant: Tenant, phone: str, offer_sdp: str, who: str) -> dict:
+    """Call a customer from the website; the person talks (no AI). Asks for permission first when needed."""
+    if not settings.CALLS_ENABLED:
+        raise ValueError("Calls are switched off on this server (CALLS_ENABLED).")
+    phone = digits(phone)
+    if not phone:
+        raise ValueError("A phone number is needed.")
+    permission = await call_permission(tenant, phone)
+    if not permission["can_call"]:
+        if not permission["can_ask"]:
+            raise ValueError("This customer hasn't allowed calls, and WhatsApp's limit on asking again is reached. "
+                             "Ask them in chat to call you instead.")
+        row = Call(tenant_id=tenant.id, customer_phone=phone, direction="outgoing", status="awaiting_permission",
+                   answered_by=who)
+        db.add(row)
+        await db.commit()
+        await ask_permission(tenant, phone, f"{tenant.business_name} would like to call you on WhatsApp.")
+        await announce(tenant.id, phone, kind="calls.changed")
+        return {"status": "awaiting_permission", "call_id": row.id,
+                "message": "They were asked to allow calls. When they accept, press Call again."}
+    async with AsyncSessionLocal() as s2:
+        row = Call(tenant_id=tenant.id, customer_phone=phone, direction="outgoing", status="ringing", answered_by=who)
+        s2.add(row)
+        await s2.commit()
+        row_id = row.id
+    leg = await _browser_leg(tenant, phone, row_id, offer_sdp)
+    try:
+        session = await dial(tenant, phone, call_row_id=row_id)
+    except Exception:
+        await leg.finish()
+        raise
+    session.taken_by = who
+    session.pending_agent = leg
+    _agent_legs[row_id] = leg
+    return {"status": "ringing", "call_id": row_id, "sdp": leg.pc.localDescription.sdp}
+
+
+# ---------------------------------------------------------------------------
 # Portal
 # ---------------------------------------------------------------------------
 
@@ -763,10 +936,12 @@ def payload(row: Call) -> dict:
     return {"id": row.id, "phone": row.customer_phone, "direction": row.direction, "status": row.status,
             "purpose": row.purpose, "summary": row.summary, "transferred": row.transferred,
             "duration_seconds": row.duration_seconds, "transcript": transcript,
+            "recording_url": row.recording_url, "answered_by": row.answered_by,
             "live": bool(row.wa_call_id and row.wa_call_id in _sessions),
-            "started_at": row.started_at.isoformat() if row.started_at else None,
-            "ended_at": row.ended_at.isoformat() if row.ended_at else None,
-            "created_at": row.created_at.isoformat() if row.created_at else None}
+            # Always with the time zone: SQLite hands back naive UTC, which a browser would read as local time.
+            "started_at": _aware(row.started_at).isoformat() if row.started_at else None,
+            "ended_at": _aware(row.ended_at).isoformat() if row.ended_at else None,
+            "created_at": _aware(row.created_at).isoformat() if row.created_at else None}
 
 
 async def list_calls(db, tenant_id: int, phone: Optional[str] = None, limit: int = 100) -> List[dict]:

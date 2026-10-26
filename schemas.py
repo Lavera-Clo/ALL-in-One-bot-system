@@ -378,6 +378,17 @@ class CatalogConnect(BaseModel):
     catalog_id: str = Field(..., min_length=5, max_length=40, example="1234567890123456")
 
 
+class BrowserCallOffer(BaseModel):
+    """The website's WebRTC offer (microphone + speaker), with its ICE candidates already gathered."""
+    sdp: str = Field(..., min_length=20, max_length=20000)
+
+
+class TeamDial(BaseModel):
+    """A person on the team calls a customer from the website."""
+    phone: str = Field(..., example="94771234567")
+    sdp: str = Field(..., min_length=20, max_length=20000)
+
+
 class CallStart(BaseModel):
     """Call a customer on WhatsApp. The AI opens with `purpose`."""
     phone: str = Field(..., example="94771234567")

@@ -67,7 +67,7 @@ from schemas import (
     TeachRequest,
     SignupRequest,
     WhatsAppConnectRequest,
-    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect,
+    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect, BrowserCallOffer, TeamDial,
     ChatBotUpdate,
     BusinessBotUpdate,
     ManualOrderCreate,
@@ -1851,6 +1851,42 @@ async def start_call_api(tenant_id: int, payload: CallStart,
         return await call_service.start_outgoing_call(db, tenant, payload.phone, payload.purpose)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/tenants/{tenant_id}/calls/team-dial", tags=["Calls"])
+async def team_dial_api(tenant_id: int, payload: TeamDial,
+                        db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Call a customer from the website and talk yourself (no AI). Send the browser's SDP offer; the answer
+    comes back. If they haven't allowed calls they're asked first, and you call again once they accept.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        return await call_service.team_dial(db, tenant, payload.phone, payload.sdp, admin.full_name or admin.username)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/answer", tags=["Calls"])
+async def team_answer_api(tenant_id: int, call_id: int, payload: BrowserCallOffer,
+                          db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Answer a ringing call from the website, or take over a call the AI is on."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        sdp = await call_service.team_answer(tenant, call_id, payload.sdp, admin.full_name or admin.username)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"sdp": sdp}
+
+
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/to-ai", tags=["Calls"])
+async def let_ai_answer_api(tenant_id: int, call_id: int,
+                            db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Stop ringing the team: the AI answers this call now."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return {"ok": await call_service.let_ai_answer(tenant, call_id)}
 
 
 @app.post("/api/tenants/{tenant_id}/calls/{call_id}/hangup", tags=["Calls"])

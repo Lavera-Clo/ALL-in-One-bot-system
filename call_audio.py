@@ -40,6 +40,7 @@ class SpeakerTrack(MediaStreamTrack):
         self._pts = 0
         self._start: Optional[float] = None
         self.forward: Optional[MediaStreamTrack] = None   # set when bridged to another call
+        self.tap: Optional[Callable[[bytes], None]] = None  # sees every 20 ms sent (call recording)
 
     def say(self, pcm: bytes) -> None:
         self._buffer.extend(pcm)
@@ -75,6 +76,8 @@ class SpeakerTrack(MediaStreamTrack):
             del self._buffer[:need]
             pcm = chunk + b"\x00" * (need - len(chunk))
         samples = len(pcm) // 2
+        if self.tap is not None:
+            self.tap(pcm)
         frame = av.AudioFrame.from_ndarray(np.frombuffer(pcm, dtype=np.int16).reshape(1, -1), format="s16", layout="mono")
         frame.sample_rate = RATE
         frame.pts = self._pts
@@ -115,8 +118,10 @@ class Listener:
     MAX_UTTERANCE = 20.0
 
     def __init__(self, track: MediaStreamTrack, on_utterance: Callable[[bytes], Awaitable[None]],
-                 on_barge_in: Callable[[], None] = lambda: None):
+                 on_barge_in: Callable[[], None] = lambda: None,
+                 on_audio: Optional[Callable[[bytes], None]] = None):
         self.track = track
+        self.on_audio = on_audio   # every 20 ms heard, 16 kHz (call recording), paused or not
         self.on_utterance = on_utterance
         self.on_barge_in = on_barge_in
         self.paused = False        # while bridged to a person the AI stops listening
@@ -134,11 +139,13 @@ class Listener:
                 frame = await self.track.recv()
             except MediaStreamError:
                 return
+            pcm = to_mono(frame, LISTEN_RATE)
+            if self.on_audio is not None:
+                self.on_audio(pcm)
             if self.paused:
                 speech.clear()
                 in_speech = False
                 continue
-            pcm = to_mono(frame, LISTEN_RATE)
             seconds = len(pcm) / 2 / LISTEN_RATE
             level = loudness(pcm)
             loud = level > self._threshold()
@@ -200,3 +207,36 @@ async def speech_pcm(text: str) -> bytes:
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[call] could not decode speech: {exc}")
         return b""
+
+
+def recording_bytes(caller: bytes, business: bytes, rate: int = LISTEN_RATE) -> bytes:
+    """
+    One call as an OGG/Opus file: the caller on the left, the business (AI or a person) on the right.
+    Both sides were taken 20 ms at a time in real time, so they line up; the shorter is padded.
+    """
+    a = np.frombuffer(caller, dtype=np.int16)
+    b = np.frombuffer(business, dtype=np.int16)
+    n = max(a.size, b.size)
+    if n == 0:
+        return b""
+    stereo = np.zeros((n, 2), dtype=np.int16)
+    stereo[:a.size, 0] = a
+    stereo[:b.size, 1] = b
+    out = io.BytesIO()
+    with av.open(out, "w", format="ogg") as container:
+        stream = container.add_stream("libopus", rate=48_000, layout="stereo")
+        stream.bit_rate = 32_000
+        resampler = av.AudioResampler(format="s16", layout="stereo", rate=48_000)
+        step = rate // 50 * 10                     # 200 ms per block
+        for i in range(0, n, step):
+            frame = av.AudioFrame.from_ndarray(stereo[i:i + step].reshape(1, -1), format="s16", layout="stereo")
+            frame.sample_rate = rate
+            for f in resampler.resample(frame):
+                for packet in stream.encode(f):
+                    container.mux(packet)
+        for f in resampler.resample(None):
+            for packet in stream.encode(f):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return out.getvalue()
