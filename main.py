@@ -1998,31 +1998,35 @@ async def hang_up_call_api(tenant_id: int, call_id: int,
 
 @app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/media", tags=["Inbox"])
 async def inbox_send_media(tenant_id: int, phone: str, file: UploadFile = File(...), caption: str = Form(""),
-                           as_type: Optional[str] = Form(None), client_msg_id: Optional[str] = Form(None),
+                           as_type: Optional[str] = Form(None), voice: bool = Form(False),
+                           client_msg_id: Optional[str] = Form(None),
                            db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     """
     Send a photo, video, audio, document or sticker from the inbox. The type is worked out from the
-    file (as_type="document" sends a photo as a file instead). WhatsApp's size limits are checked first.
+    file (as_type="document" sends a photo as a file instead); voice=true sends a recording as a voice
+    note. Formats WhatsApp won't take are converted (media_service.prepare_outgoing).
     """
     tenant = await _get_tenant_or_404(db, tenant_id, admin)
     phone = _chat_phone(phone)
     earlier = await find_by_client_id(db, tenant.id, client_msg_id)
     if earlier is not None:
         return {"message_id": earlier.id, "ok": earlier.status != "FAILED", "error": earlier.error}
-    data = await file.read()
-    mime = (file.content_type or "application/octet-stream").split(";")[0].lower()
-    kind = as_type if as_type in media_service.MEDIA_KINDS else media_service.kind_for(mime, file.filename or "")
-    problem = media_service.check_file(kind, mime, len(data))
-    if problem:
-        raise HTTPException(status_code=400, detail=problem)
-    url = media_service.save_file(data, mime, file.filename or "")
-    name = file.filename or None
+    raw = await file.read()
+    if len(raw) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Too big for WhatsApp (the limit is 100 MB).")
+    try:
+        ready = await asyncio.to_thread(media_service.prepare_outgoing, raw, file.content_type or "",
+                                        file.filename or "", as_type, voice)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    data, mime, kind, name = ready["data"], ready["mime"], ready["kind"], ready["name"]
+    url = media_service.save_file(data, mime, name)
 
     async def send():
         media_id = await upload_whatsapp_media(tenant.whatsapp_phone_number_id, data, mime, name or "file",
                                                tenant.meta_access_token)
         await send_whatsapp_media(tenant.whatsapp_phone_number_id, phone, kind, tenant.meta_access_token,
-                                  media_id=media_id, caption=caption, filename=name or "")
+                                  media_id=media_id, caption=caption, filename=name or "", voice=ready["voice"])
 
     return await send_other_as_agent(tenant, phone, send, media={"url": url, "mime": mime, "name": name},
                                      client_msg_id=client_msg_id)

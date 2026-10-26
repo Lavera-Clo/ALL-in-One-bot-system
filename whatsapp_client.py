@@ -44,11 +44,15 @@ def _summary(kind: str, a: dict) -> str:
     if kind == "media":
         label = {"image": "Image", "video": "Video", "audio": "Audio", "document": "Document",
                  "sticker": "Sticker"}.get(a.get("media_type"), "File")
+        if a.get("voice"):
+            label = "Voice note"
         detail = a.get("filename") if a.get("media_type") == "document" else ""
         return " ".join(x for x in (f"[{label}]", detail, a.get("caption") or "") if x).strip()
     if kind == "location":
+        # The same as a received location: the place, then a map link the inbox makes clickable.
         place = " - ".join(x for x in (a.get("name"), a.get("address")) if x)
-        return f"[Location] {place or ''} ({a.get('latitude')}, {a.get('longitude')})".replace("  ", " ")
+        maps = f"https://maps.google.com/?q={a.get('latitude')},{a.get('longitude')}"
+        return f"[Location] {place}\n{maps}".replace("] \n", "]\n")
     if kind == "contacts":
         return "[Contact] " + ", ".join(f"{c.get('name')} {c.get('phone')}" for c in a.get("contacts") or [])
     if kind == "catalog":
@@ -586,9 +590,13 @@ async def upload_whatsapp_media(phone_number_id: str, data: bytes, mime_type: st
 
 @_reported("media")
 async def send_whatsapp_media(phone_number_id: str, recipient_phone: str, media_type: str, meta_access_token: str,
-                              media_id: str = "", link: str = "", caption: str = "", filename: str = "") -> dict:
-    """An image, video, audio, document or sticker, by uploaded media id or by public link."""
+                              media_id: str = "", link: str = "", caption: str = "", filename: str = "",
+                              voice: bool = False) -> dict:
+    """An image, video, audio, document or sticker, by uploaded media id or by public link.
+    voice=True (OGG/Opus audio) shows as a voice note with the play bar, not a music file."""
     body = {"id": media_id} if media_id else {"link": link}
+    if voice and media_type == "audio":
+        body["voice"] = True
     if caption and media_type in ("image", "video", "document"):
         body["caption"] = caption
     if filename and media_type == "document":
@@ -596,8 +604,16 @@ async def send_whatsapp_media(phone_number_id: str, recipient_phone: str, media_
     if _mock_token(meta_access_token):
         logger.info(f"[MOCK WHATSAPP SENDER] {media_type} to {recipient_phone}: {body}")
         return {"status": "mock_sent", "messages": [{"id": f"wamid.mock.{media_type}"}]}
-    return await _post_message(phone_number_id, meta_access_token,
-                               {"to": recipient_phone, "type": media_type, media_type: body})
+    try:
+        return await _post_message(phone_number_id, meta_access_token,
+                                   {"to": recipient_phone, "type": media_type, media_type: body})
+    except httpx.HTTPStatusError as exc:
+        if not body.pop("voice", None) or exc.response.status_code != 400:
+            raise
+        # Older Graph API versions refuse the voice-note flag: send it as plain audio instead.
+        logger.warning("Voice-note flag refused; sending as plain audio")
+        return await _post_message(phone_number_id, meta_access_token,
+                                   {"to": recipient_phone, "type": media_type, media_type: body})
 
 
 @_reported("location")

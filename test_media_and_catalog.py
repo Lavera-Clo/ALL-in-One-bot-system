@@ -9,6 +9,7 @@ Offline: Meta is scripted; the database and the media folder are throwaways.
 """
 
 import asyncio
+import io
 import os
 import sys
 import tempfile
@@ -71,6 +72,54 @@ def hook(phone, message, msg_id, pid="5050"):
     return {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
         "messaging_product": "whatsapp", "metadata": {"phone_number_id": pid},
         "contacts": [{"wa_id": phone, "profile": {"name": "Nimal"}}], "messages": [message]}}]}]}
+
+
+def picture(fmt, w, h, noise=False):
+    from PIL import Image
+    if noise:
+        img = Image.frombytes("RGB", (w, h), os.urandom(w * h * 3))
+    else:
+        img = Image.new("RGB", (w, h), "orange")
+    buf = io.BytesIO()
+    img.save(buf, fmt)
+    return buf.getvalue()
+
+
+def wav_tone(seconds=1.0):
+    import math
+    import struct
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                               for i in range(int(16000 * seconds))))
+    return buf.getvalue()
+
+
+def webm_voice():
+    """What Chrome's MediaRecorder makes: Opus audio in a WebM file."""
+    import av
+    import numpy as np
+    out = io.BytesIO()
+    with av.open(out, "w", format="webm") as c:
+        stream = c.add_stream("libopus", rate=48000, layout="mono")
+        t = np.arange(48000) / 48000
+        pcm = (np.sin(2 * np.pi * 300 * t) * 8000).astype(np.int16)
+        for i in range(0, pcm.size, 960):
+            frame = av.AudioFrame.from_ndarray(pcm[i:i + 960].reshape(1, -1), format="s16", layout="mono")
+            frame.sample_rate = 48000
+            for packet in stream.encode(frame):
+                c.mux(packet)
+        for packet in stream.encode(None):
+            c.mux(packet)
+    return out.getvalue()
+
+
+def served_size(url):
+    return os.path.getsize(os.path.join(os.environ["MEDIA_DIR"], url.rsplit("/", 1)[1]))
 
 
 async def rows(tenant_id, phone=CUSTOMER):
@@ -155,12 +204,45 @@ async def main_async():
                               files={"file": ("price-list.pdf", b"%PDF-1.4 x", "application/pdf")})
         check(r.json()["ok"] and sent[-1][0] == "document" and "price-list.pdf" in sent[-1][2], "a PDF goes as a document, with its name")
         for fname, data, mime, kind in [("clip.mp4", b"v" * 100, "video/mp4", "video"), ("song.mp3", b"a" * 100, "audio/mpeg", "audio"),
-                                        ("s.webp", b"w" * 100, "image/webp", "sticker")]:
+                                        ("s.webp", picture("WEBP", 512, 512), "image/webp", "sticker")]:
             r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A, files={"file": (fname, data, mime)})
             check(r.json()["ok"] and sent[-1][0] == kind, f"{mime} goes as {kind}")
+
+        print("\nFiles WhatsApp won't take are converted, not refused")
+        big = picture("PNG", 3000, 3000, noise=True)
         r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
-                              files={"file": ("big.jpg", b"x" * (6 * 1024 * 1024), "image/jpeg")})
-        check(r.status_code == 400 and "5 MB" in r.json()["detail"], "a 6 MB photo is refused with WhatsApp's limit (5 MB)")
+                              files={"file": ("big.png", big, "image/png")})
+        out = (await rows(tid))[-1]
+        check(len(big) > 5 * 1024 * 1024 and r.json()["ok"] and sent[-1][0] == "image" and out.media_mime == "image/jpeg"
+              and served_size(out.media_url) <= 5 * 1024 * 1024,
+              f"a {len(big) // 1048576} MB photo is shrunk under WhatsApp's 5 MB and sent as a photo")
+        for fname, data, mime, label in [("pic.webp", picture("WEBP", 800, 600), "image/webp", "a WEBP photo (not a sticker)"),
+                                         ("pic.bmp", picture("BMP", 400, 300), "image/bmp", "a BMP picture")]:
+            r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A, files={"file": (fname, data, mime)})
+            out = (await rows(tid))[-1]
+            check(r.json()["ok"] and sent[-1][0] == "image" and out.media_mime == "image/jpeg" and out.media_name.endswith(".jpg"),
+                  f"{label} goes as a JPEG photo")
+        r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
+                              files={"file": ("tour.mov", b"m" * 100, "video/quicktime")})
+        check(r.json()["ok"] and sent[-1][0] == "document", "a .mov video WhatsApp can't play still arrives, as a file")
+        r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
+                              files={"file": ("memo.wav", wav_tone(), "audio/wav")})
+        out = (await rows(tid))[-1]
+        check(r.json()["ok"] and sent[-1][0] == "audio" and out.media_mime == "audio/ogg", "a WAV recording is converted to OGG audio")
+
+        print("\nA voice note recorded in the browser")
+        r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
+                              files={"file": ("rec.webm", webm_voice(), "audio/webm;codecs=opus")}, data={"voice": "true"})
+        out = (await rows(tid))[-1]
+        check(r.json()["ok"] and sent[-1][0] == "audio" and sent[-1][2].startswith("[Voice note]"),
+              "Chrome's WebM recording goes as a WhatsApp voice note")
+        check(out.media_mime == "audio/ogg" and served_size(out.media_url) > 500, "converted to OGG/Opus, and kept to play back in the inbox")
+        r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
+                              files={"file": ("rec.webm", b"not audio", "audio/webm")}, data={"voice": "true"})
+        check(r.status_code == 400 and "voice note" in r.json()["detail"], "a broken recording: a clear message")
+        r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
+                              files={"file": ("empty.pdf", b"", "application/pdf")})
+        check(r.status_code == 400 and "empty" in r.json()["detail"], "an empty file is refused")
         r = await client.post(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/media", headers=A,
                               files={"file": ("photo.jpg", JPEG, "image/jpeg")}, data={"as_type": "document"})
         check(r.json()["ok"] and sent[-1][0] == "document", "a photo can be sent as a file instead (full quality)")

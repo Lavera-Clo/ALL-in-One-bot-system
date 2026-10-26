@@ -12,6 +12,7 @@ characters - unguessable - because a browser <img>/<video> tag can't send a sign
 Meta itself must be able to fetch a link we send.
 """
 
+import io
 import logging
 import mimetypes
 import os
@@ -50,6 +51,90 @@ def kind_for(mime: str, filename: str = "") -> str:
         if mime in ALLOWED[kind][0]:
             return kind
     return "document"
+
+
+# --- Making a file sendable -------------------------------------------------------------------
+#
+# WhatsApp takes only a few formats per type. Rather than refuse what a browser or phone produces,
+# convert it: a voice recording (WebM from Chrome, MP4 from Safari) -> an OGG/Opus voice note; a
+# HEIC/WEBP/BMP photo, or one over 5 MB -> JPEG; other audio -> OGG/Opus. A video WhatsApp can't
+# play goes as a document, so the customer still gets the file.
+
+PHOTO_MAX_EDGE = 2560
+_SENDABLE_PHOTO = {"image/jpeg", "image/png"}
+
+
+def _ext(name: str, ext: str) -> str:
+    stem = (name or "file").rsplit(".", 1)[0] or "file"
+    return f"{stem}.{ext}"
+
+
+def _to_jpeg(data: bytes, limit: int) -> bytes:
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    img.thumbnail((PHOTO_MAX_EDGE, PHOTO_MAX_EDGE))
+    for quality in (88, 80, 70, 60):
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=quality, optimize=True)
+        if out.tell() <= limit:
+            break
+    return out.getvalue()
+
+
+def _is_sticker(data: bytes) -> bool:
+    """A WhatsApp sticker is a 512 x 512 WEBP; any other WEBP is just a photo."""
+    try:
+        from PIL import Image
+        return Image.open(io.BytesIO(data)).size == (512, 512)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def prepare_outgoing(data: bytes, mime: str, filename: str = "", as_type: Optional[str] = None,
+                     voice: bool = False) -> dict:
+    """{"data", "mime", "name", "kind", "voice"} ready for WhatsApp. Raises ValueError with a reason."""
+    from voice_reply_service import _mp3_to_ogg_opus as to_ogg_opus
+    mime = (mime or "application/octet-stream").split(";")[0].strip().lower()
+    name = filename or "file"
+    if not data:
+        raise ValueError("The file is empty.")
+    if voice:
+        try:
+            data = to_ogg_opus(data)
+        except Exception:  # noqa: BLE001
+            raise ValueError("That recording couldn't be turned into a voice note. Try recording again.")
+        return {"data": data, "mime": "audio/ogg", "name": "voice-note.ogg", "kind": "audio", "voice": True}
+    if as_type == "document":
+        kind = "document"
+    elif mime == "image/webp":
+        kind = "sticker" if _is_sticker(data) and len(data) <= ALLOWED["sticker"][1] else "image"
+    elif mime.startswith("image/") and mime != "image/svg+xml":
+        kind = "image"
+    elif mime.startswith("video/"):
+        kind = "video" if mime in ALLOWED["video"][0] else "document"
+    elif mime.startswith("audio/"):
+        kind = "audio"
+    else:
+        kind = "document"
+
+    if kind == "image" and (mime not in _SENDABLE_PHOTO or len(data) > ALLOWED["image"][1]):
+        try:
+            data = _to_jpeg(data, ALLOWED["image"][1])
+        except Exception:  # noqa: BLE001
+            # A picture this can't open (a rare format): it still goes, as a file.
+            kind = "document"
+        else:
+            mime, name = "image/jpeg", _ext(name, "jpg")
+    if kind == "audio" and mime not in ALLOWED["audio"][0]:
+        try:
+            data = to_ogg_opus(data)
+            mime, name = "audio/ogg", _ext(name, "ogg")
+        except Exception:  # noqa: BLE001
+            kind = "document"
+    problem = check_file(kind, mime, len(data))
+    if problem:
+        raise ValueError(problem)
+    return {"data": data, "mime": mime, "name": name, "kind": kind, "voice": False}
 
 
 def check_file(kind: str, mime: str, size: int) -> Optional[str]:
