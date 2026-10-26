@@ -69,6 +69,10 @@ def describe_send_error(exc: Exception) -> str:
         if code in (131047, 131026) or "re-engagement" in str(err.get("message", "")).lower():
             return ("Outside the 24-hour window. WhatsApp only allows an approved template message "
                     "until this customer writes to you again.")
+        if code == 190 or exc.response.status_code == 401:
+            # Meta no longer accepts the access token: a temporary one (24 h) ran out, or it was replaced.
+            return ("WhatsApp access token expired or was replaced. Make a permanent System User token in "
+                    "Meta Business settings and paste it in Train Bot → Live on WhatsApp → Change number, then Retry.")
         message = err.get("error_user_msg") or err.get("message") or exc.response.text
         return f"WhatsApp refused the message: {str(message)[:300]}"
     return f"Could not reach WhatsApp: {exc.__class__.__name__}"
