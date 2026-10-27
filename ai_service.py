@@ -26,7 +26,7 @@ HUMAN_STYLE_RULES = (
     "--- SOUND LIKE A REAL PERSON (APPLIES TO EVERY REPLY) ---\n"
     "You are one person having one continuous chat, not a system answering tickets.\n"
     "- MATCH THEM: Mirror the customer's length, energy and formality. A three-word message gets a short reply. "
-    "'bro' or 'machan' gets relaxed; 'sir' or 'madam' gets polite. If they mix English words into Singlish, so do you.\n"
+    "'bro' or 'machan' gets relaxed; 'sir' or 'madam' gets polite. If they mix languages, match their style.\n"
     "- REACT FIRST: Respond to what they actually said and how they said it (excitement, worry, a joke, a late-night "
     "message) before giving information. One short human beat, not a speech.\n"
     "- NO TEMPLATES: Never reuse an opening, a closing or a stock phrase from your earlier replies in this chat. Look "
@@ -75,29 +75,35 @@ SMART_CHAT_RULES = (
     "a custom discount, a hall booking confirmation, or private account details) and it is NOT in the knowledge base, say plainly that you do not have "
     "that detail, offer to check with the team, then append [NOT_IN_KNOWLEDGE_BASE] at the very end of your reply. Never guess prices or stock.\n"
     "   - GENERAL KNOWLEDGE: If the customer asks a general question (about fabrics, sizing, styling advice, how delivery or bank transfers work in general, "
-    "the date/time, local Sri Lankan geography, or friendly small talk), answer warmly and intelligently using your general knowledge, then guide them back to what they need from the business.\n"
+    "the date/time, local geography, or friendly small talk), answer warmly and intelligently using your general knowledge, then guide them back to what they need from the business.\n"
     "------------------------------------------\n"
 )
 
 GENERAL_KNOWLEDGE_RULES = (
     "--- GENERAL KNOWLEDGE & REAL-WORLD COMMON SENSE ---\n"
-    "You possess broad, helpful real-world and local Sri Lankan knowledge. "
+    "You possess broad, helpful real-world knowledge relevant to any business, anywhere in the world. "
     "Do NOT act like an empty machine that refuses to answer unless a fact is written in the business knowledge base.\n"
     "1. WHAT YOU CAN FREELY ANSWER FROM GENERAL KNOWLEDGE:\n"
-    "   - Real-world advice & explanations: Fabric types (linen, cotton, silk, denim, rayon/viscose, polyester, durability, breathability in hot Sri Lankan weather, washing/care tips), "
-    "standard garment sizing & measurements (how to measure chest/waist/hips in inches/cm, standard S/M/L/XL sizing concepts), styling tips, color matching.\n"
-    "   - Commerce & Logistics in Sri Lanka: How Cash on Delivery (COD) works, how bank deposit slips or online transfers work, "
-    "general delivery timelines (1-3 business days in Western Province, 3-5 days outstation), courier tracking basics.\n"
-    "   - Local Geography & Context: Sri Lankan cities and towns (Colombo, Kandy, Galle, Gampaha, Kurunegala, Negombo, Jaffna, Matara, etc.), "
-    "general travel routes/distances (e.g., Southern Expressway), climate/monsoon awareness, Poya days, holidays, and cultural norms.\n"
+    "   - Real-world advice & explanations: Fabric types (linen, cotton, silk, denim, rayon/viscose, polyester, durability, breathability, washing/care tips), "
+    "standard garment sizing & measurements (how to measure chest/waist/hips in inches/cm, standard S/M/L/XL sizing across regions), styling tips, color matching, "
+    "food and ingredient basics, health and wellness common sense, technology product categories, vehicle maintenance basics.\n"
+    "   - Commerce & Logistics: How Cash on Delivery (COD) works, how bank transfers and online payments work, "
+    "general shipping and delivery concepts, courier tracking basics, return and refund processes, customs and duties for international shipping.\n"
+    "   - Geography & Local Context: Use whatever the business's location is (from the persona) to give locally relevant advice. "
+    "If you know the region, reference local cities, transport, weather patterns, holidays, and cultural norms naturally. "
+    "For any country, answer questions about its major cities, travel distances, climate, public holidays, and business customs.\n"
     "   - Time & Calendar: Today's date, day of the week, upcoming weekends, and time of day (referencing the Real-Time Calendar block).\n"
     "   - Conversational Etiquette & Small Talk: Responding warmly to 'how are you', 'thank you', 'good morning/night', polite humor, "
-    "compliments, and wishing happy holidays.\n"
+    "compliments, and wishing happy holidays or cultural celebrations appropriate to the customer's locale.\n"
+    "   - Unit Conversions & Practical Math: Converting between metric and imperial, currency awareness, basic calculations "
+    "the customer might need (area, quantity, approximate totals from listed prices).\n"
+    "   - Industry Common Sense: General knowledge relevant to the business's industry — food safety basics for restaurants, "
+    "appointment etiquette for clinics, travel tips for tourism, workout basics for gyms, property terminology for real estate.\n"
     "2. THE STRICT DISTINCTION:\n"
     "   - PROPRIETARY BUSINESS FACTS (Strict): Exact product prices, live inventory availability, custom discounts, private bank account "
     "numbers, and official booking agreements MUST come from the Knowledge Base or Inventory. If missing, say you will confirm with the team.\n"
     "   - GENERAL KNOWLEDGE (Helpful): Explaining what a material is, providing styling tips, clarifying how sizes usually work, "
-    "answering calendar/time, or polite conversation: answer directly, warmly, and intelligently without refusing or saying you don't know.\n"
+    "answering calendar/time, discussing local geography, or polite conversation: answer directly, warmly, and intelligently without refusing or saying you don't know.\n"
     "----------------------------------------------------\n"
 )
 
@@ -343,8 +349,9 @@ async def transcribe_audio(audio_bytes: bytes, api_key: str = "") -> str:
         return ""
     # Guide Whisper to understand Sri Lankan context and Singlish better
     whisper_prompt = (
-        "The user is a customer in Sri Lanka asking a local business about products, prices and bookings. "
-        "They might speak in English, Sinhala, or Singlish (Romanized Sinhala). "
+        "The user is a customer contacting a business about products, prices and bookings. "
+        "They may speak in English or in a local language including Sinhala, Singlish (Romanized Sinhala), "
+        "Hindi, Arabic, Spanish, French, or another language. "
         "Examples of Singlish: 'meke ganan kohomada', 'ada open da', 'details tika ewanna'."
     )
     try:
@@ -353,15 +360,13 @@ async def transcribe_audio(audio_bytes: bytes, api_key: str = "") -> str:
         logger.error(f"Error transcribing audio: {e}")
         return ""
 
-def get_sri_lanka_greeting() -> Tuple[str, str, str]:
+def get_time_greeting() -> Tuple[str, str, str]:
     """
-    Returns time-aware Sri Lanka greeting tuple (English, Sinhala, Singlish)
-    Calculated based on Sri Lanka Time (UTC +5:30).
+    Returns time-aware greeting tuple (English, Sinhala, Singlish).
+    Uses the business's configured timezone (settings.BUSINESS_TIMEZONE).
     """
     try:
-        from datetime import datetime, timezone, timedelta
-        sl_tz = timezone(timedelta(hours=5, minutes=30))
-        now = datetime.now(sl_tz)
+        now = business_now()
         hour = now.hour
     except Exception:
         hour = 12
@@ -390,6 +395,11 @@ SINGLISH_KEYWORDS = [
     "denna", "kiyanna", "balanna", "neda", "ane", "bro", "macho", "sthuthi",
     "bohowama", "oya", "oyata", "oyalage", "mata", "wena", "thawa",
     "diyan", "elama", "obata", "obatai", "gollan", "hitanne", "kello", "kollo",
+    "thiyenawa", "thiyenawada", "thiyeda", "thiyanawa", "thiyanawada",
+    "meka", "araka", "monada", "mokakda", "mokada", "kawadda",
+    "koheda", "kohedha", "danna", "dannako", "ganna", "gandako", "denda",
+    "nadda", "naha", "nehe", "naa", "awulak", "ehenam",
+    "karanna", "karannada", "gannada", "tikak", "oyala", "oyalata", "onna", "menna",
 ]
 
 # Singlish glues endings onto words ('ewannako', 'hariyata'), so a keyword may START a word.
@@ -445,8 +455,13 @@ _EVERYDAY_WORDS = {
     "book", "booking", "date", "time", "open", "close", "hours", "available", "location", "address",
     "start", "help", "contact", "manager", "call", "number", "phone", "send", "pdf", "brochure",
     "detail", "details", "info", "list", "menu", "package", "service", "order", "buy", "delivery",
+    "size", "sizes", "fabric", "material", "color", "colour", "cotton", "linen", "cod", "cash",
+    "bank", "slip", "payment", "account", "transfer", "exchange", "return", "refund", "track",
+    "tracking", "courier", "dress", "shirt", "pant", "pants", "trouser", "tshirt", "fit",
+    "inches", "cm", "islandwide", "stock", "item", "items", "sample", "model",
     "ayubowan", "kohomada", "ewanna", "denna", "kiyanna", "puluwan", "hari", "oya", "mata",
     "ganan", "mila", "kiyada", "sthuthi", "eka", "eke", "ekak", "meka", "ada", "heta",
+    "thiyenawa", "thiyenawada", "koheda", "danna", "ganna", "nadda", "awulak",
 }
 
 
@@ -569,7 +584,7 @@ _PRICE_RE = re.compile(
     r"|මිල|ගණන්|කීයද"
 )
 # A line that states an amount: a currency mark beside a number, or any number of 3+ digits.
-_AMOUNT_RE = re.compile(r"(?:rs\.?|lkr|usd|\$|€|£)\s?\d|\d\s?/-|\d[\d,]{2,}", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"(?:rs\.?|lkr|inr|usd|eur|gbp|aed|aud|cad|sgd|myr|thb|jpy|krw|\$|€|£|¥|₹|₱|฿|﷼|RM\s?)\s?\d|\d\s?/-|\d[\d,]{2,}", re.IGNORECASE)
 
 
 def relevant_kb_lines(message: str, kb_lines: List[str], limit: int = 6) -> List[str]:
@@ -644,7 +659,7 @@ def smart_knowledge_base_search(user_message: str, knowledge_base: str, system_p
     ])
 
     # Fetch time-aware Sri Lankan greetings
-    greeting_en, greeting_si, greeting_sg = get_sri_lanka_greeting()
+    greeting_en, greeting_si, greeting_sg = get_time_greeting()
 
     # Pure Greeting Check
     greetings_list = ["hi", "hello", "hey", "ayubowan", "good morning", "good afternoon", "good evening", "greetings", "start", "ආයුබෝවන්"]
@@ -844,8 +859,11 @@ def unsupported_reply_numbers(reply: str, allowed_text: str, config) -> List[str
         digits = re.sub(r"\D", "", number or "")
         if digits:
             phones.add(digits)
-            if digits.startswith("94"):
-                phones.add("0" + digits[2:])       # local Sri Lankan form, e.g. 0342275000
+            # Common international format: strip country code and add local leading zero
+            # Works for +94 (Sri Lanka), +91 (India), +44 (UK), +1 (US/CA), etc.
+            if len(digits) > 6:
+                for prefix_len in (1, 2, 3):  # try 1-3 digit country codes
+                    phones.add("0" + digits[prefix_len:])
 
     check = _URL_RE.sub(" ", reply or "")
     check = re.sub(r"[  -​  　]", " ", check)
@@ -1016,22 +1034,22 @@ async def generate_bot_reply(
 
     # Reply through the multi-provider router (Groq -> Gemini -> OpenRouter -> ...).
     try:
-        greeting_en, greeting_si, greeting_sg = get_sri_lanka_greeting()
+        greeting_en, greeting_si, greeting_sg = get_time_greeting()
         lang = detect_language_intent(user_message, chat_history)
         
         lang_instruction = (
             f"\n\n--- STRICT LANGUAGE CONTINUITY RULE ---\n"
             f"The customer's current detected language is '{lang.upper()}'.\n"
-            f"You MUST reply 100% in {lang.upper()} (Singlish / Sinhala / English).\n"
-            f"Maintain this language consistently for the entire rest of the conversation.\n"
-            f"If the customer speaks Singlish (romanized Sinhala like 'ayubowan', 'kohomada', 'ewanna'), reply ONLY in Singlish.\n"
-            f"If the customer speaks Sinhala script, reply ONLY in Sinhala.\n"
-            f"If the customer speaks English, reply ONLY in English.\n"
-            f"Singlish & Sinhala natural grammar:\n"
-            f"- Use the natural, polite spoken Sri Lankan Sinhala/Singlish a helpful shop or hotel person uses.\n"
-            f"- In Singlish, say 'api' (we/us), not 'apa'. Spell the way people type on WhatsApp (mata, oyata, "
-            f"puluwan, thiyenawa) and leave everyday English words in English (price, booking, delivery, date).\n"
-            f"- In Sinhala script, use natural spoken phrasing, not formal written Sinhala.\n"
+            f"You MUST reply in the SAME language the customer is using.\n"
+            f"Maintain this language consistently for the entire conversation.\n"
+            f"If the customer writes in a non-English language (Sinhala, Singlish, Hindi, Arabic, Spanish, French, "
+            f"Portuguese, Malay, Thai, Tamil, etc.), reply fluently in THAT language.\n"
+            f"If the customer speaks English, reply in English.\n"
+            f"Language-specific guidelines:\n"
+            f"- Singlish (romanized Sinhala): say 'api' (we/us), not 'apa'. Spell the way people type on WhatsApp "
+            f"(mata, oyata, puluwan, thiyenawa) and leave everyday English words in English.\n"
+            f"- For any language: use natural spoken phrasing, not formal literary style. Match how locals actually text.\n"
+            f"- If the customer mixes two languages (code-switching), match their style naturally.\n"
             f"----------------------------------------\n"
         )
         # --- Handoff rules: the trigger list and the contact details are the CLIENT'S own,

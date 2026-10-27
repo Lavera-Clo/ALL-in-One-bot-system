@@ -50,6 +50,8 @@ class Settings(BaseSettings):
 
     # Time zone the bot lives in: it is told today's date and the time of day from this, so it
     # can answer "is it open now?" and plan dates correctly.
+    # Default timezone for the business. Set this per deployment to the tenant's local timezone.
+    # Examples: Asia/Colombo, America/New_York, Europe/London, Asia/Dubai, Asia/Kuala_Lumpur
     BUSINESS_TIMEZONE: str = os.getenv("BUSINESS_TIMEZONE", "Asia/Colombo")
 
     # A customer who sends a voice note gets a voice note back (then the same reply in text).
