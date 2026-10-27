@@ -56,6 +56,10 @@ def _ms(when: Optional[datetime]) -> int:
 def describe_incoming(message: dict) -> Tuple[str, str]:
     """(text the inbox shows, message type) for one message from Meta's webhook."""
     kind = message.get("type") or "unknown"
+    from media_service import describe as describe_media
+    special = describe_media(message)
+    if special is not None:
+        return special, kind
     if kind == "text":
         return (message.get("text") or {}).get("body", ""), kind
     if kind == "interactive":
@@ -198,12 +202,18 @@ async def on_whatsapp_sent(phone_number_id: str, recipient: str, text: str, kind
                           content=text or f"[{kind}]", sender=sender, message_type=kind,
                           status="SENT" if ok else "FAILED", error=None if ok else error, wa_message_id=wa_message_id,
                           client_msg_id=(ctx or {}).get("client_msg_id"))
+        media = (ctx or {}).get("media") or {}
+        row.media_url, row.media_mime, row.media_name = media.get("url"), media.get("mime"), media.get("name")
         db.add(row)
         conv.last_message_at = utc_now()
         conv.message_count = (conv.message_count or 0) + 1
         if sender == "agent" and ok:
             conv.needs_human = False   # a person has answered
         await db.commit()
+        if sender == "agent" and ok and kind == "text":
+            # What they told the customer may be worth teaching the bot (owner approves first).
+            from learning_service import learn_from_chat_later
+            learn_from_chat_later(tenant.id, recipient)
         if ctx is not None:
             ctx["message_id"] = row.id
         await announce(tenant.id, recipient)
@@ -232,6 +242,25 @@ async def send_as_agent(tenant: Tenant, phone: str, text: str, retry_of: Optiona
         _outgoing.reset(token)
 
 
+async def send_other_as_agent(tenant: Tenant, phone: str, send, media: Optional[Dict] = None,
+                              client_msg_id: Optional[str] = None) -> Dict:
+    """
+    Like send_as_agent, for anything that isn't plain text (media_service.py): `send` is an async
+    callable doing the WhatsApp send; `media` ({"url", "mime", "name"}) is kept on the inbox row.
+    """
+    from whatsapp_client import describe_send_error
+
+    ctx = {"sender": "agent", "client_msg_id": client_msg_id, "media": media}
+    token = _outgoing.set(ctx)
+    try:
+        await send()
+        return {"message_id": ctx.get("message_id"), "ok": True, "error": None}
+    except Exception as exc:  # noqa: BLE001 - already recorded as FAILED by the listener
+        return {"message_id": ctx.get("message_id"), "ok": False, "error": describe_send_error(exc)}
+    finally:
+        _outgoing.reset(token)
+
+
 # ---------------------------------------------------------------------------
 # Reading the inbox
 # ---------------------------------------------------------------------------
@@ -255,6 +284,8 @@ def message_payload(row: ChatHistory) -> Dict:
         "label": None,
         "clientMsgId": row.client_msg_id,
         "waMessageId": row.wa_message_id,      # Meta's id: how a phone matches messages it already has
+        "media": ({"url": row.media_url, "mime": row.media_mime, "name": row.media_name}
+                  if row.media_url else None),   # photo / video / audio / document / sticker
     }
 
 

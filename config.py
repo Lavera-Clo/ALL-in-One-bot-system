@@ -57,6 +57,20 @@ class Settings(BaseSettings):
     # A customer who sends a voice note gets a voice note back (then the same reply in text).
     VOICE_REPLIES: bool = os.getenv("VOICE_REPLIES", "true").strip().lower() not in ("0", "false", "no")
 
+    # WhatsApp voice calls (call_service.py): the AI answers calls and can call customers.
+    # Calling needs a newer Graph API than messaging, so it has its own version.
+    CALLS_ENABLED: bool = os.getenv("CALLS_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+    CALLS_GRAPH_API_VERSION: str = os.getenv("CALLS_GRAPH_API_VERSION", "v23.0")
+    CALL_STUN_SERVER: str = os.getenv("CALL_STUN_SERVER", "stun:stun.l.google.com:19302")
+    CALL_MAX_MINUTES: int = int(os.getenv("CALL_MAX_MINUTES", "15"))
+    # Incoming calls ring the team's website first for this long; then the AI answers (0 = AI at once).
+    CALL_TEAM_RING_SECONDS: int = int(os.getenv("CALL_TEAM_RING_SECONDS", "15"))
+    # Keep a recording of each call (the greeting tells callers). false = no recordings.
+    CALL_RECORDING: bool = os.getenv("CALL_RECORDING", "true").strip().lower() not in ("0", "false", "no")
+    # After a call a person handled: transcribe it, keep it in the chat history, and suggest the
+    # facts they gave as answers for the owner to approve (call_service.learn_from_call).
+    CALL_LEARNING: bool = os.getenv("CALL_LEARNING", "true").strip().lower() not in ("0", "false", "no")
+
     # AI providers. Any combination may be set; llm_router.py tries them in order and
     # falls back when one is rate-limited, overloaded or out of quota.
     GEMINI_API_KEY: str = ""

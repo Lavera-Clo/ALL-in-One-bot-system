@@ -62,6 +62,9 @@ class BotConfig:
     # This customer and this conversation (conversation_memory.ConversationContext): their name,
     # time since they last wrote, and what the bot remembers. Set per message by the webhook.
     conversation: Optional[object] = None
+    # The shop's live product list (order_math.CatalogItem: name, price, stock), so totals are worked out by
+    # code and never by the AI. Empty for a business that sells nothing through the bot.
+    catalog: List[object] = field(default_factory=list)
 
     # ---------- derived helpers, used when building prompts and replies ----------
 

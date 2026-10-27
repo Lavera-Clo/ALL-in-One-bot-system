@@ -50,6 +50,11 @@ class Tenant(Base):
     # How many days of messages the shared database keeps (sync_service.py cleans up daily).
     # Contacts and daily message counts are kept regardless.
     history_days: Mapped[int] = mapped_column(Integer, default=21, nullable=False)
+    # WhatsApp catalogue (catalog_service.py): the Meta Commerce catalogue linked to this number.
+    # Products are synced to it, so customers can browse and send a cart from WhatsApp itself.
+    wa_catalog_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    catalog_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    catalog_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -144,6 +149,11 @@ class ChatHistory(Base):
     # sync by ("everything changed after X").
     client_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     changed_us: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # Photos, videos, voice notes, documents and stickers, sent or received (media_service.py):
+    # a copy kept on this server, so the inbox can show it after WhatsApp's own link expires.
+    media_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    media_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="chat_histories")
 
@@ -202,6 +212,8 @@ class Conversation(Base):
     # refreshed in the background; memory_upto_id = the last message it has read.
     memory: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_upto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Learning from the team's replies (learning_service.learn_from_chat): the last message looked at.
+    learned_upto_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def display_name(self) -> str:
@@ -233,6 +245,9 @@ class KnowledgeGap(Base):
     source: Mapped[str] = mapped_column(String(20), default="chat", nullable=False)   # 'chat' | 'test' | 'owner'
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False, index=True)  # open | answered | dismissed
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)         # the owner's answer, once given
+    # What a person on the team told a caller (call_service.learn_from_call). Only a suggestion:
+    # it is used once the owner checks it and saves it as the answer.
+    suggested_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -450,3 +465,58 @@ def _stamp(mapper, connection, target) -> None:
 for _model in (ChatHistory, Conversation):
     event.listen(_model, "before_insert", _stamp)
     event.listen(_model, "before_update", _stamp)
+
+
+class Booking(Base):
+    """
+    A booking or appointment request a customer made in chat (booking_service.py). The bot collects
+    what's needed and records it here as 'pending'; a person confirms or declines it, and the customer
+    is told. The bot never confirms a booking itself.
+    """
+    __tablename__ = "bookings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    service: Mapped[str | None] = mapped_column(String(255), nullable=True)      # what: a table, a dental check-up, a hall
+    when_text: Mapped[str | None] = mapped_column(String(255), nullable=True)    # when, in the customer's words
+    party_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)  # pending|confirmed|declined|cancelled
+    handled_by: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<Booking(id={self.id}, tenant={self.tenant_id}, {self.customer_phone}, {self.status})>"
+
+
+class Call(Base):
+    """
+    A WhatsApp voice call (call_service.py), incoming or outgoing. The AI answers and talks; for
+    complaints, or when the caller asks for a person, it rings the manager and joins the two calls.
+    """
+    __tablename__ = "calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    wa_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)          # incoming | outgoing
+    # awaiting_permission | allowed | ringing | in_progress | transferring | with_team | completed | missed | rejected | failed
+    status: Mapped[str] = mapped_column(String(24), default="ringing", nullable=False, index=True)
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)             # outgoing: why we are calling
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)          # JSON [{"who": "customer|bot|team", "text": ...}]
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transferred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    answered_by: Mapped[str | None] = mapped_column(String(150), nullable=True)   # the team member who talked
+    recording_url: Mapped[str | None] = mapped_column(Text, nullable=True)        # OGG, caller left / business right
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    def __repr__(self) -> str:
+        return f"<Call(id={self.id}, tenant={self.tenant_id}, {self.direction} {self.customer_phone}, {self.status})>"

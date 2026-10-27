@@ -175,6 +175,9 @@ async def record_device_message(db: AsyncSession, tenant: Tenant, phone: str, te
     await db.commit()
     await db.refresh(row)
     await announce(tenant.id, phone)
+    if status != "FAILED" and kind == "text":
+        from learning_service import learn_from_chat_later
+        learn_from_chat_later(tenant.id, phone)     # a reply from the phone app teaches too
     return row
 
 

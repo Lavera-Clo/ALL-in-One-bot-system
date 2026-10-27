@@ -41,3 +41,4 @@ class ConnectionManager:
 
 manager = ConnectionManager()          # order events, for the Orders dashboard
 inbox_manager = ConnectionManager()    # chat events, for the live inbox (inbox_service.py)
+call_desks = ConnectionManager()       # the websites open now that can answer calls (call_service.team_online)

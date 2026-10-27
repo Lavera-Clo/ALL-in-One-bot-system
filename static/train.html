@@ -311,6 +311,23 @@
         </div>
 
         <div class="card">
+            <h2><i class="fa-solid fa-globe"></i> Train from your website</h2>
+            <p class="hint">Paste your website's address. The bot reads the home page and up to 7 of its most useful pages (prices, menu, delivery, contact…) and learns them like a document. Use <b>Read website again</b> on it later when your website changes.</p>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                <input class="form-control" id="siteUrl" placeholder="www.yourshop.lk" style="flex:1;min-width:200px">
+                <button class="btn btn-primary" id="siteBtn"><i class="fa-solid fa-globe"></i> Read &amp; train</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2><i class="fa-solid fa-camera"></i> Train from photos</h2>
+            <p class="hint">Photos of your menu, price board, product list or brochure (JPG or PNG, up to 20). Two different AI models read every photo and check each other's numbers, so prices aren't misread.</p>
+            <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp" multiple class="form-control">
+            <div class="field" style="margin-top:0.6rem"><label>Title (optional)</label><input class="form-control" id="photoTitle" placeholder="e.g. Menu board, June 2026"></div>
+            <button class="btn btn-primary" id="photoBtn"><i class="fa-solid fa-wand-magic-sparkles"></i> Read photos &amp; train</button>
+        </div>
+
+        <div class="card">
             <h2><i class="fa-regular fa-folder-open"></i> What the bot knows</h2>
             <p class="hint">Turn a document off to make the bot forget it for now, or delete it permanently. Either way the knowledge base is rebuilt from what is left.</p>
             <div class="stat-row" id="docStats"></div>
@@ -416,6 +433,17 @@
             <div class="field"><label>Question</label><input class="form-control" id="teachQ" placeholder="e.g. Is there parking?"></div>
             <div class="field"><label>Answer</label><textarea class="form-control" id="teachA" style="min-height:80px" placeholder="e.g. Yes, free parking for about 80 cars next to the hall."></textarea></div>
             <button class="btn btn-primary" id="teachBtn"><i class="fa-solid fa-floppy-disk"></i> Save answer</button>
+        </div>
+        <div class="card">
+            <h2><i class="fa-solid fa-file-excel"></i> Upload your FAQ</h2>
+            <p class="hint">A spreadsheet (.xlsx or .csv): <b>questions in column A, answers in column B</b>, one per row (a header row is fine). Every row is taught at once — up to 500.</p>
+            <input type="file" id="faqInput" accept=".csv,.xlsx,.xlsm,.tsv,.txt" class="form-control">
+            <button class="btn btn-primary" id="faqBtn" style="margin-top:0.6rem"><i class="fa-solid fa-upload"></i> Upload &amp; teach</button>
+        </div>
+        <div class="card">
+            <h2><i class="fa-solid fa-comments"></i> Learn from your team's replies</h2>
+            <p class="hint">When you or your staff answer a customer in the inbox (or on a call), general facts you gave — prices, hours, delivery — show up above as <b>suggested answers</b>. Nothing is used until you check it and press Save. This happens by itself; press the button to look through the last 90 days of chats now.</p>
+            <button class="btn btn-ghost" id="learnChatsBtn"><i class="fa-solid fa-magnifying-glass"></i> Look through past chats</button>
         </div>
         <div class="card">
             <h2><i class="fa-solid fa-check-double"></i> Answers you've taught</h2>
@@ -751,6 +779,7 @@ function renderDocuments(documents) {
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                     <button class="btn btn-primary btn-sm" data-act="save" data-id="${doc.id}" ${busy ? 'disabled' : ''}><i class="fa-solid fa-floppy-disk"></i> Save changes</button>
                     <button class="btn btn-ghost btn-sm" data-act="retrain" data-id="${doc.id}" ${busy ? 'disabled' : ''}><i class="fa-solid fa-rotate"></i> Retrain with AI</button>
+                    ${doc.source === 'website' ? `<button class="btn btn-ghost btn-sm" data-act="refreshSite" data-id="${doc.id}" ${busy ? 'disabled' : ''}><i class="fa-solid fa-globe"></i> Read website again</button>` : ''}
                 </div>
             </div>
         </div>`;
@@ -787,6 +816,12 @@ $('docList').addEventListener('click', async (e) => {
             });
             document.activeElement.blur();
             toast('Saved. The bot uses this from the next message.');
+            await loadDocuments();
+        } else if (act === 'refreshSite') {
+            if (button.disabled) return;
+            button.disabled = true;
+            const r = await api(`/api/tenants/${tenantId}/documents/${id}/refresh-website`, { method: 'POST' });
+            toast(r.message);
             await loadDocuments();
         } else if (act === 'retrain') {
             if (button.disabled) return;
@@ -1057,7 +1092,8 @@ async function loadGaps() {
             <div class="asked">Asked ${g.times_asked} time${g.times_asked === 1 ? '' : 's'}${g.language ? ' · ' + escapeHtml(g.language) : ''}</div>
             <input class="form-control" data-field="question" value="${escapeHtml(g.question)}" style="margin-top:0.4rem;font-weight:600">
             ${g.bot_reply ? `<div class="said"><b>Bot said:</b> ${escapeHtml(g.bot_reply)}</div>` : '<div style="height:0.7rem"></div>'}
-            <textarea class="form-control" data-field="answer" style="min-height:70px" placeholder="Type the answer the bot should give…"></textarea>
+            ${g.suggested_answer ? `<div class="said"><b><i class="fa-solid ${g.source === 'call' ? 'fa-phone' : 'fa-comments'}"></i> Your team answered this ${g.source === 'call' ? 'on a call' : 'in a chat'}.</b> Check it, edit if needed, then save — the bot uses it only after you save.</div>` : ''}
+            <textarea class="form-control" data-field="answer" style="min-height:70px" placeholder="Type the answer the bot should give…">${escapeHtml(g.suggested_answer || '')}</textarea>
             <div style="display:flex;gap:0.4rem;margin-top:0.6rem;flex-wrap:wrap">
                 <button class="btn btn-primary btn-sm" data-gap-action="answer"><i class="fa-solid fa-check"></i> Save answer</button>
                 <button class="btn btn-ghost btn-sm" data-gap-action="dismiss">Ignore</button>
@@ -1073,6 +1109,55 @@ async function loadGaps() {
         </div>`).join('')
         : '<div class="empty">Nothing taught yet.</div>';
 }
+
+async function busyRun(button, work) {
+    if (button.disabled) return;
+    const label = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
+    try { await work(); }
+    catch (err) { toast(err.message, false); }
+    finally { button.disabled = false; button.innerHTML = label; }
+}
+
+$('siteBtn').addEventListener('click', () => busyRun($('siteBtn'), async () => {
+    const url = $('siteUrl').value.trim();
+    if (!url) throw new Error('Paste your website address first.');
+    const r = await api(`/api/tenants/${tenantId}/documents/website`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+    $('siteUrl').value = '';
+    toast(r.message);
+    await loadDocuments();
+}));
+
+$('photoBtn').addEventListener('click', () => busyRun($('photoBtn'), async () => {
+    const files = $('photoInput').files;
+    if (!files.length) throw new Error('Choose one or more photos first.');
+    const form = new FormData();
+    for (const f of files) form.append('files', f);
+    if ($('photoTitle').value.trim()) form.append('title', $('photoTitle').value.trim());
+    const r = await api(`/api/tenants/${tenantId}/documents/photos`, { method: 'POST', body: form });
+    $('photoInput').value = ''; $('photoTitle').value = '';
+    toast(r.message);
+    await loadDocuments();
+}));
+
+$('faqBtn').addEventListener('click', () => busyRun($('faqBtn'), async () => {
+    const file = $('faqInput').files[0];
+    if (!file) throw new Error('Choose your FAQ spreadsheet first.');
+    const form = new FormData();
+    form.append('file', file);
+    const r = await api(`/api/tenants/${tenantId}/faq/import`, { method: 'POST', body: form });
+    $('faqInput').value = '';
+    toast(r.message);
+    await loadGaps();
+}));
+
+$('learnChatsBtn').addEventListener('click', () => busyRun($('learnChatsBtn'), async () => {
+    const r = await api(`/api/tenants/${tenantId}/learn-from-chats`, { method: 'POST' });
+    toast(r.message);
+    setTimeout(() => loadGaps().catch(() => {}), 60000);
+}));
 
 document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-gap-action]');

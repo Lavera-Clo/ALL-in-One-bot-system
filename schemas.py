@@ -296,6 +296,11 @@ class BotProfileUpdate(BaseModel):
     _check_industry = field_validator("industry")(_industry_key)
 
 
+class WebsiteTrain(BaseModel):
+    """Train the bot from the business's own website."""
+    url: str = Field(..., min_length=4, max_length=500, example="https://www.laveraclo.lk")
+
+
 class TenantDocumentUpdate(BaseModel):
     title: Optional[str] = None
     trigger_keywords: Optional[str] = Field(None, example="price, ganan, mila, rate, cost")
@@ -346,6 +351,53 @@ class ContactUpdate(BaseModel):
 
 class HistorySettings(BaseModel):
     history_days: int = Field(21, example=21)
+
+
+class BookingUpdate(BaseModel):
+    """Answer a booking request. For 'confirmed' and 'declined' the customer is messaged."""
+    status: str = Field(..., example="confirmed")
+    # Your own words to the customer instead of the standard message.
+    message: Optional[str] = Field(None, max_length=1000)
+
+
+class ShareContact(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    phone: str = Field(..., min_length=5, max_length=30, example="+94771234567")
+
+
+class InboxShare(BaseModel):
+    """Send something other than text or a file: a location, contact cards, the catalogue, products."""
+    type: str = Field(..., example="location")          # location | contacts | catalog | products
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    name: Optional[str] = Field(None, max_length=100)
+    address: Optional[str] = Field(None, max_length=300)
+    contacts: Optional[List[ShareContact]] = None
+    product_ids: Optional[List[int]] = Field(None, max_length=30)
+    text: Optional[str] = Field(None, max_length=1000)
+    client_msg_id: Optional[str] = Field(None, max_length=64)
+
+
+class CatalogConnect(BaseModel):
+    """The catalogue ID from Meta Commerce Manager (Catalogue -> Settings)."""
+    catalog_id: str = Field(..., min_length=5, max_length=40, example="1234567890123456")
+
+
+class BrowserCallOffer(BaseModel):
+    """The website's WebRTC offer (microphone + speaker), with its ICE candidates already gathered."""
+    sdp: str = Field(..., min_length=20, max_length=20000)
+
+
+class TeamDial(BaseModel):
+    """A person on the team calls a customer from the website."""
+    phone: str = Field(..., example="94771234567")
+    sdp: str = Field(..., min_length=20, max_length=20000)
+
+
+class CallStart(BaseModel):
+    """Call a customer on WhatsApp. The AI opens with `purpose`."""
+    phone: str = Field(..., example="94771234567")
+    purpose: str = Field(..., min_length=3, max_length=500, example="Your order #12 is ready to collect.")
 
 
 class ChatBotUpdate(BaseModel):

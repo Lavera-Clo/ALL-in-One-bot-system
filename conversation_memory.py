@@ -63,6 +63,7 @@ class ConversationContext:
     brief: Dict = field(default_factory=dict)
     brief_upto_id: Optional[int] = None
     newest_id: Optional[int] = None                    # the message being answered
+    left_off: str = ""                                 # the last messages exchanged before this one
 
     @property
     def returning_after_gap(self) -> bool:
@@ -115,7 +116,16 @@ def build_context(conversation, history_records, newest_id: Optional[int] = None
         else:
             last_bot = when
     minutes = lambda t: round((now - t).total_seconds() / 60, 1) if t else None  # noqa: E731
+    # Where the conversation stood: the last couple of messages, so that a customer who comes back
+    # after days gets "did you decide about the gift box?" and not a blank "how can I help?".
+    left_off = []
+    for row in history_records[-3:]:
+        who = "Customer" if (row.sender or ("customer" if row.role == "user" else "bot")) == "customer" else "You"
+        text = " ".join((row.content or "").split())
+        if text:
+            left_off.append(f"{who}: {text[:160]}")
     return ConversationContext(
+        left_off="\n".join(left_off),
         tenant_id=getattr(conversation, "tenant_id", 0) or 0,
         phone=getattr(conversation, "customer_phone", "") or "",
         customer_name=usable_name(getattr(conversation, "display_name", "") if conversation else ""),
@@ -155,7 +165,12 @@ def context_prompt(ctx: Optional[ConversationContext]) -> str:
         lines.append("This is their FIRST message to the business. Welcome them; don't say 'welcome back'.")
     elif ctx.returning_after_gap:
         lines.append(f"They are coming back: their previous message was {describe_gap(ctx.minutes_since_customer)}. "
-                     "Greet them as a returning customer and, if it fits, mention what you were talking about.")
+                     "Greet them as a returning customer and pick up where you left off.")
+        if ctx.left_off:
+            lines.append("How the last conversation ended:\n" + ctx.left_off)
+            lines.append("If their message is only a greeting, say hello and refer to that unfinished thing in your own "
+                         "words (e.g. ask whether they decided). Never answer a returning customer with a blank "
+                         "'anything else?' or 'how can I help?'.")
     else:
         lines.append(f"This is an ongoing conversation (their previous message was "
                      f"{describe_gap(ctx.minutes_since_customer)}). Don't greet them again or start over - "

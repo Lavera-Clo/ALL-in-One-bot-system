@@ -36,7 +36,7 @@ from business_idea_service import generate_business_ideas, create_pdf_from_text
 
 from config import settings
 from database import init_db, get_db, AsyncSessionLocal
-from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun, PasswordResetRequest
+from models import Tenant, TenantDocument, ChatHistory, Product, Order, OrderItem, AdminUser, AdminSession, BotTestRun, PasswordResetRequest, Booking
 
 from schemas import (
     TenantCreate,
@@ -67,12 +67,13 @@ from schemas import (
     TeachRequest,
     SignupRequest,
     WhatsAppConnectRequest,
-    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings,
+    InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect, BrowserCallOffer, TeamDial, WebsiteTrain,
     ChatBotUpdate,
     BusinessBotUpdate,
     ManualOrderCreate,
 )
-from learning_service import answer_gap, dismiss_gap, gap_payload, get_gap, list_gaps, record_gap, teach
+from learning_service import (answer_gap, dismiss_gap, gap_payload, get_gap, learn_from_past_chats, list_gaps,
+                              record_gap, teach, teach_many)
 from self_test_service import recover_interrupted_runs, run_payload, run_self_test, start_run as start_test_run
 from understanding_service import (
     PLACEHOLDER_PROMPT_START, recover_interrupted as recover_interrupted_understanding, understand_business,
@@ -96,6 +97,12 @@ from whatsapp_client import (
     download_whatsapp_media,
     send_whatsapp_typing_indicator,
     send_whatsapp_voice_note,
+    send_whatsapp_catalog,
+    send_whatsapp_media,
+    send_whatsapp_location,
+    send_whatsapp_contacts,
+    send_whatsapp_products,
+    upload_whatsapp_media,
 )
 from order_service import (
     get_active_products,
@@ -122,20 +129,25 @@ from order_service import (
     mark_cart_reminded,
     create_manual_order,
     get_dynamic_kb,
+    load_catalog,
 )
 from auth_service import hash_password, verify_password, generate_session_token, session_expiry, validate_password_strength
 from payment_service import stripe_is_configured, create_payment_link, verify_and_parse_webhook
 from invoice_service import generate_invoice_pdf
-from realtime import manager as ws_manager, inbox_manager
+from realtime import manager as ws_manager, inbox_manager, call_desks
 from inbox_service import (
     bot_may_reply, chat_messages, describe_incoming, get_conversation, is_manager, list_chats, mark_needs_human,
-    on_whatsapp_sent, record_incoming, send_as_agent, set_business_bot, set_chat_bot, update_incoming_text,
+    on_whatsapp_sent, record_incoming, send_as_agent, send_other_as_agent, set_business_bot, set_chat_bot, update_incoming_text,
     MAX_REPLY_CHARS,
 )
 from whatsapp_client import add_send_listener
 from sync_service import (
     HISTORY_DAYS_ALLOWED, apply_statuses, cleanup_old_messages, contact_payload, find_by_client_id,
     list_contacts, message_stats, record_device_message, sync_changes, update_contact,
+)
+from booking_service import (
+    capture_later as capture_booking_later, handle_manager_command as handle_booking_command,
+    list_bookings, payload as booking_payload, set_status as set_booking_status, STATUSES as BOOKING_STATUSES,
 )
 from conversation_memory import build_context as build_conversation_context, load_brief as load_conversation_brief
 from voice_service import (
@@ -146,6 +158,8 @@ from voice_service import (
 # Every message sent to a customer is recorded for the live inbox (inbox_service.py).
 add_send_listener(on_whatsapp_sent)
 from rate_limit import RateLimitMiddleware, SecurityHeadersMiddleware
+import media_service
+import catalog_service
 from bot_profile_generator import generate_bot_profile
 from bot_learning import get_learning_stats
 
@@ -367,6 +381,8 @@ MAIN_MENU_RESEND_SECONDS = 30 * 60
 
 # Mount static folder for serving PDFs, images, and admin interface
 app.mount("/static", StaticFiles(directory="static"), name="static")
+# Photos, videos, voice notes and documents sent or received on WhatsApp (media_service.py).
+app.mount("/media", StaticFiles(directory=media_service.MEDIA_DIR), name="media")
 
 # HTTP Security Headers (defense-in-depth across all responses)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -1263,6 +1279,8 @@ from document_service import (
     update_document,
 )
 import llm_router
+import call_service
+import training_sources
 from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
 from tenant_config import build_bot_config, parse_quick_menu
 from industry_brain import CONTACT_BUTTON_ID, INDUSTRY_CHOICES, button_phrase, get_pack
@@ -1453,6 +1471,102 @@ async def upload_tenant_document(
         "message": f"'{document.title}' uploaded. Training has started — it usually takes 1-3 minutes.",
         "document": _document_payload(document),
     }
+
+
+@app.post("/api/tenants/{tenant_id}/documents/website", tags=["Bot Portal"])
+async def train_from_website(tenant_id: int, payload: WebsiteTrain, background_tasks: BackgroundTasks,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Read the business's website (the home page and up to 7 of its most useful pages: prices, menu,
+    delivery, contact...) and train it like a document.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        site = await training_sources.read_website(payload.url)
+        document = await create_document(db, tenant, pasted_text=site["text"], title=f"Website: {site['title']}"[:255],
+                                         doc_type="knowledge")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.source = "website"
+    document.original_filename = site["url"][:255]
+    await db.commit()
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"Read {len(site['pages'])} page(s) from {site['url']}. Training has started.",
+            "pages": site["pages"], "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/documents/{document_id}/refresh-website", tags=["Bot Portal"])
+async def refresh_website_document(tenant_id: int, document_id: int, background_tasks: BackgroundTasks,
+                                   db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """The website changed (new prices...): read it again and retrain."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    document = (await db.execute(select(TenantDocument).where(
+        TenantDocument.id == document_id, TenantDocument.tenant_id == tenant.id))).scalar_one_or_none()
+    if not document or document.source != "website":
+        raise HTTPException(status_code=404, detail="Website document not found")
+    if document.status in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="This document is already training.")
+    try:
+        site = await training_sources.read_website(document.original_filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.raw_text = site["text"]
+    document.char_count = len(site["text"])
+    document = await queue_retrain(db, document)
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"Read {len(site['pages'])} page(s) again. Retraining.", "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/documents/photos", tags=["Bot Portal"])
+async def train_from_photos(tenant_id: int, background_tasks: BackgroundTasks, files: List[UploadFile] = File(...),
+                            title: Optional[str] = Form(None),
+                            db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Photos of a menu, price board or product list. They become one PDF (a page per photo) that the AI
+    vision readers read - two different models on each page, cross-checking every number.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    photos = [(await f.read(), f.filename or "photo") for f in files]
+    try:
+        pdf = await asyncio.to_thread(training_sources.photos_to_pdf, photos)
+        name = f"photos-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.pdf"
+        document = await create_document(db, tenant, content=pdf, filename=name,
+                                         title=(title or f"Photos ({len(photos)})")[:255], doc_type="knowledge")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    document.source = "photos"
+    await db.commit()
+    background_tasks.add_task(run_training, document.id)
+    return {"message": f"{len(photos)} photo(s) uploaded. The AI is reading them - usually 1-3 minutes.",
+            "document": _document_payload(document)}
+
+
+@app.post("/api/tenants/{tenant_id}/faq/import", tags=["Bot Learning"])
+async def import_faq(tenant_id: int, file: UploadFile = File(...),
+                     db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """A spreadsheet (.csv or .xlsx): questions in column A, answers in column B. Each row is taught at once."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="The file is over 5 MB.")
+    try:
+        pairs = training_sources.parse_faq(content, file.filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    result = await teach_many(db, tenant, pairs, source="faq")
+    return {"message": f"Taught {result['added']} new answer(s), updated {result['updated']}.", **result}
+
+
+@app.post("/api/tenants/{tenant_id}/learn-from-chats", tags=["Bot Learning"])
+async def learn_from_chats_api(tenant_id: int, background_tasks: BackgroundTasks, days: int = Query(90, ge=1, le=365),
+                               db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Look through chats where your team replied (last `days`): general facts they told customers become
+    suggested answers in "Questions to answer", for you to check and save.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    background_tasks.add_task(learn_from_past_chats, tenant.id, days)
+    return {"message": "Looking through your team's replies. Suggestions appear in 'Questions to answer' in a minute or two."}
 
 
 @app.patch("/api/tenants/{tenant_id}/documents/{document_id}", tags=["Bot Portal"])
@@ -1785,6 +1899,245 @@ async def message_stats_api(tenant_id: int, days: int = Query(30, ge=1, le=730),
     return {"days": await message_stats(db, tenant_id, days)}
 
 
+# --- Bookings the bot collected from chats (booking_service.py) ---------------------------------
+
+@app.get("/api/tenants/{tenant_id}/bookings", tags=["Bookings"])
+async def bookings_api(tenant_id: int, status_filter: Optional[str] = Query(None, alias="status"),
+                       db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Booking and appointment requests, newest first. `?status=pending` for the ones waiting for an answer."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    if status_filter and status_filter not in BOOKING_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(BOOKING_STATUSES)}")
+    return {"bookings": await list_bookings(db, tenant_id, status_filter)}
+
+
+@app.patch("/api/tenants/{tenant_id}/bookings/{booking_id}", tags=["Bookings"])
+async def update_booking_api(tenant_id: int, booking_id: int, payload: BookingUpdate,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Confirm, decline or cancel a booking. Confirm and decline message the customer (in their language)."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    booking = await db.get(Booking, booking_id)
+    if booking is None or booking.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status != "pending":
+        raise HTTPException(status_code=400, detail=f"This booking is already {booking.status}.")
+    try:
+        sent = await set_booking_status(db, tenant, booking, payload.status, by=admin.full_name or admin.username, message=payload.message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.refresh(booking)
+    return {"booking": booking_payload(booking), "customer_message": sent}
+
+
+@app.get("/api/tenants/{tenant_id}/calls", tags=["Calls"])
+async def list_calls_api(tenant_id: int, phone: Optional[str] = None,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """WhatsApp voice calls, newest first, with transcript and summary."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return {"calls": await call_service.list_calls(db, tenant.id, phone)}
+
+
+@app.post("/api/tenants/{tenant_id}/calls", tags=["Calls"])
+async def start_call_api(tenant_id: int, payload: CallStart,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Call a customer on WhatsApp; the AI talks, opening with `purpose`. If they haven't allowed calls
+    they get WhatsApp's "allow calls?" request first and the call starts when they accept.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        return await call_service.start_outgoing_call(db, tenant, payload.phone, payload.purpose)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/tenants/{tenant_id}/calls/team-dial", tags=["Calls"])
+async def team_dial_api(tenant_id: int, payload: TeamDial,
+                        db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Call a customer from the website and talk yourself (no AI). Send the browser's SDP offer; the answer
+    comes back. If they haven't allowed calls they're asked first, and you call again once they accept.
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        return await call_service.team_dial(db, tenant, payload.phone, payload.sdp, admin.full_name or admin.username)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/answer", tags=["Calls"])
+async def team_answer_api(tenant_id: int, call_id: int, payload: BrowserCallOffer,
+                          db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Answer a ringing call from the website, or take over a call the AI is on."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        sdp = await call_service.team_answer(tenant, call_id, payload.sdp, admin.full_name or admin.username)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"sdp": sdp}
+
+
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/to-ai", tags=["Calls"])
+async def let_ai_answer_api(tenant_id: int, call_id: int,
+                            db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Stop ringing the team: the AI answers this call now."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    return {"ok": await call_service.let_ai_answer(tenant, call_id)}
+
+
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/hangup", tags=["Calls"])
+async def hang_up_call_api(tenant_id: int, call_id: int,
+                           db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    if not await call_service.hang_up_call(db, tenant.id, call_id):
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"message": "Call ended."}
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/media", tags=["Inbox"])
+async def inbox_send_media(tenant_id: int, phone: str, file: UploadFile = File(...), caption: str = Form(""),
+                           as_type: Optional[str] = Form(None), voice: bool = Form(False),
+                           client_msg_id: Optional[str] = Form(None),
+                           db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """
+    Send a photo, video, audio, document or sticker from the inbox. The type is worked out from the
+    file (as_type="document" sends a photo as a file instead); voice=true sends a recording as a voice
+    note. Formats WhatsApp won't take are converted (media_service.prepare_outgoing).
+    """
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    phone = _chat_phone(phone)
+    earlier = await find_by_client_id(db, tenant.id, client_msg_id)
+    if earlier is not None:
+        return {"message_id": earlier.id, "ok": earlier.status != "FAILED", "error": earlier.error}
+    raw = await file.read()
+    if len(raw) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Too big for WhatsApp (the limit is 100 MB).")
+    try:
+        ready = await asyncio.to_thread(media_service.prepare_outgoing, raw, file.content_type or "",
+                                        file.filename or "", as_type, voice)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    data, mime, kind, name = ready["data"], ready["mime"], ready["kind"], ready["name"]
+    url = media_service.save_file(data, mime, name)
+
+    async def send():
+        media_id = await upload_whatsapp_media(tenant.whatsapp_phone_number_id, data, mime, name or "file",
+                                               tenant.meta_access_token)
+        await send_whatsapp_media(tenant.whatsapp_phone_number_id, phone, kind, tenant.meta_access_token,
+                                  media_id=media_id, caption=caption, filename=name or "", voice=ready["voice"])
+
+    return await send_other_as_agent(tenant, phone, send, media={"url": url, "mime": mime, "name": name},
+                                     client_msg_id=client_msg_id)
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/share", tags=["Inbox"])
+async def inbox_share(tenant_id: int, phone: str, payload: InboxShare,
+                      db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Send a location pin, contact cards, the catalogue, or products from the catalogue."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    phone = _chat_phone(phone)
+    pid, token = tenant.whatsapp_phone_number_id, tenant.meta_access_token
+    if payload.type == "location":
+        if payload.latitude is None or payload.longitude is None:
+            raise HTTPException(status_code=400, detail="A location needs latitude and longitude.")
+        send = lambda: send_whatsapp_location(pid, phone, payload.latitude, payload.longitude, token,  # noqa: E731
+                                              name=payload.name or "", address=payload.address or "")
+    elif payload.type == "contacts":
+        if not payload.contacts:
+            raise HTTPException(status_code=400, detail="Add at least one contact (name and phone).")
+        send = lambda: send_whatsapp_contacts(pid, phone, [c.model_dump() for c in payload.contacts], token)  # noqa: E731
+    elif payload.type in ("catalog", "products"):
+        if not tenant.wa_catalog_id:
+            raise HTTPException(status_code=400, detail="Connect a WhatsApp catalogue first (Catalogue settings).")
+        if payload.type == "catalog":
+            send = lambda: send_whatsapp_catalog(pid, phone, payload.text or "Browse our products here 👇", token)  # noqa: E731
+        else:
+            ids = [f"p{i}" for i in payload.product_ids or []]
+            if not ids:
+                raise HTTPException(status_code=400, detail="Choose at least one product.")
+            send = lambda: send_whatsapp_products(pid, phone, tenant.wa_catalog_id, ids, token,  # noqa: E731
+                                                  body_text=payload.text or "")
+    else:
+        raise HTTPException(status_code=400, detail="type must be location, contacts, catalog or products.")
+    return await send_other_as_agent(tenant, phone, send, client_msg_id=payload.client_msg_id)
+
+
+@app.get("/api/tenants/{tenant_id}/catalog", tags=["Catalogue"])
+async def catalog_status_api(tenant_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Is a WhatsApp catalogue connected, when were products last synced, and any error from Meta."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    products = (await db.execute(select(Product).where(Product.tenant_id == tenant.id))).scalars().all()
+    return {**catalog_service.status(tenant),
+            "without_image": [p.name for p in products if catalog_service.missing_for_catalogue(p)]}
+
+
+@app.post("/api/tenants/{tenant_id}/catalog", tags=["Catalogue"])
+async def catalog_connect_api(tenant_id: int, payload: CatalogConnect,
+                              db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Connect the Commerce Manager catalogue (by its ID), switch on the WhatsApp cart, and sync all products."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        result = await catalog_service.connect(db, tenant, payload.catalog_id)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**catalog_service.status(tenant), "result": result}
+
+
+@app.post("/api/tenants/{tenant_id}/catalog/sync", tags=["Catalogue"])
+async def catalog_sync_api(tenant_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Push every product (name, price, stock, picture) to the WhatsApp catalogue again."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    if not tenant.wa_catalog_id:
+        raise HTTPException(status_code=400, detail="No catalogue connected.")
+    return await catalog_service.sync(db, tenant)
+
+
+@app.delete("/api/tenants/{tenant_id}/catalog", tags=["Catalogue"])
+async def catalog_disconnect_api(tenant_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Stop using the WhatsApp catalogue ("shop" goes back to the product list). Nothing is deleted at Meta."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    tenant.wa_catalog_id = None
+    tenant.catalog_error = None
+    await db.commit()
+    return catalog_service.status(tenant)
+
+
+@app.get("/shop/{tenant_id}/{product_id}", response_class=HTMLResponse, include_in_schema=False)
+async def public_product_page(tenant_id: int, product_id: int, db: AsyncSession = Depends(get_db)):
+    """The product page each catalogue item links to (Meta requires a link)."""
+    import html as _html
+    product = await db.get(Product, product_id)
+    tenant = await db.get(Tenant, tenant_id)
+    if product is None or tenant is None or product.tenant_id != tenant.id or not product.is_active:
+        raise HTTPException(status_code=404, detail="Not found")
+    esc = _html.escape
+    image = catalog_service._public(product.image_url or "")
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{esc(product.name)}</title><style>body{{font-family:system-ui;max-width:560px;margin:24px auto;padding:0 16px}}"
+        "img{width:100%;border-radius:12px}</style></head><body>"
+        + (f"<img src='{esc(image)}' alt=''>" if image else "")
+        + f"<h1>{esc(product.name)}</h1><p><b>{esc(tenant.currency or 'LKR')} {product.price:,.2f}</b></p>"
+        f"<p>{esc(product.description or '')}</p><p>{esc(tenant.business_name or '')} — order on WhatsApp.</p></body></html>")
+
+
+@app.post("/api/tenants/{tenant_id}/calls/manager-permission", tags=["Calls"])
+async def ask_manager_call_permission(tenant_id: int,
+                                      db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Ask the manager's WhatsApp to allow calls, so the AI can put customers through to them."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    if not tenant.human_handoff_number:
+        raise HTTPException(status_code=400, detail="Set the manager's number (human hand-off number) first.")
+    try:
+        await call_service.ask_permission(tenant, tenant.human_handoff_number,
+                                          "Allow calls so the assistant can put customers through to you.")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "Sent. Tap 'Allow' on the manager's WhatsApp."}
+
+
 @app.post("/api/tenants/{tenant_id}/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, tags=["Orders"])
 async def create_manual_order_api(tenant_id: int, payload: ManualOrderCreate,
                                   db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
@@ -1799,7 +2152,8 @@ async def create_manual_order_api(tenant_id: int, payload: ManualOrderCreate,
 
 
 @app.websocket("/ws/inbox/{tenant_id}")
-async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[str] = Query(None)):
+async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[str] = Query(None),
+                          calls: Optional[str] = Query(None)):
     """
     Live updates for an open inbox: chat changes, the master switch, and order events. Opens its
     own short database session to check the token, so no session stays open for the socket's life.
@@ -1815,6 +2169,8 @@ async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[
     await websocket.accept()
     inbox_manager.register(tenant_id, websocket)
     ws_manager.register(tenant_id, websocket)       # order_created / order_updated too
+    if calls == "1":
+        call_desks.register(tenant_id, websocket)   # this website answers calls: ring it first
     try:
         while True:
             await websocket.receive_text()
@@ -1823,6 +2179,7 @@ async def inbox_websocket(websocket: WebSocket, tenant_id: int, token: Optional[
     finally:
         inbox_manager.disconnect(tenant_id, websocket)
         ws_manager.disconnect(tenant_id, websocket)
+        call_desks.disconnect(tenant_id, websocket)
 
 
 # ---------------------------------------------------------------------------
@@ -2296,12 +2653,25 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
             metadata = value.get("metadata", {})
             phone_number_id = metadata.get("phone_number_id")
 
+            # WhatsApp voice calls (call_service.py): incoming offers, answers to our calls, hang-ups.
+            if (value.get("calls") or change.get("field") == "calls") and phone_number_id:
+                call_tenant = (await db.execute(
+                    select(Tenant).where(Tenant.whatsapp_phone_number_id == phone_number_id))).scalar_one_or_none()
+                if call_tenant:
+                    await call_service.handle_call_events(call_tenant, value)
+
             # Delivery / read receipts for messages sent to customers: the ticks every device shows.
+            # Statuses of type "call" (RINGING / ACCEPTED / REJECTED) belong to calls we placed.
             if value.get("statuses") and phone_number_id:
                 status_tenant = (await db.execute(
                     select(Tenant).where(Tenant.whatsapp_phone_number_id == phone_number_id))).scalar_one_or_none()
                 if status_tenant:
-                    await apply_statuses(db, status_tenant, value["statuses"])
+                    call_statuses = [s for s in value["statuses"] if s.get("type") == "call"]
+                    message_statuses = [s for s in value["statuses"] if s.get("type") != "call"]
+                    if call_statuses:
+                        await call_service.handle_call_statuses(status_tenant, call_statuses)
+                    if message_statuses:
+                        await apply_statuses(db, status_tenant, message_statuses)
 
             messages = value.get("messages", [])
             if not messages or not phone_number_id:
@@ -2309,6 +2679,14 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
 
             for message in messages:
                 try:
+                    # "Allow calls?" answered: place the call that was waiting for it.
+                    if (message.get("interactive") or {}).get("type") == "call_permission_reply":
+                        perm_tenant = (await db.execute(
+                            select(Tenant).where(Tenant.whatsapp_phone_number_id == phone_number_id))).scalar_one_or_none()
+                        if perm_tenant and not seen_before(message.get("id")):
+                            await call_service.handle_permission_reply(
+                                perm_tenant, message.get("from", ""), message["interactive"].get("call_permission_reply") or {})
+                        continue
                     msg_type = message.get("type")
                     customer_phone = message.get("from")
                     user_text = ""
@@ -2354,6 +2732,9 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     if msg_type == "audio":
                         voice, voice_style = await hear_voice_note(db, tenant, customer_phone, message)
                         await update_incoming_text(db, incoming_row, voice_inbox_text(voice))
+                    # A copy of the photo / video / voice note / document / sticker for the inbox.
+                    if msg_type in media_service.MEDIA_KINDS:
+                        await media_service.store_incoming(db, tenant, incoming_row, message)
 
                     conversation = await get_conversation(db, tenant.id, customer_phone)
                     if not bot_may_reply(tenant, conversation) and not is_manager(tenant, customer_phone):
@@ -2442,6 +2823,32 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 meta_access_token=tenant.meta_access_token
                             )
                             continue
+                    elif msg_type == "order":
+                        # A cart sent from the WhatsApp catalogue (catalog_service.py): it becomes the
+                        # bot's cart, then the usual checkout (stock, payment) takes over.
+                        cart_items, problems = await catalog_service.order_to_cart(
+                            db, tenant, customer_phone, message.get("order") or {})
+                        if cart_items:
+                            note = ("\n\n⚠️ " + "; ".join(problems)) if problems else ""
+                            await send_whatsapp_button_message(
+                                phone_number_id=tenant.whatsapp_phone_number_id,
+                                recipient_phone=customer_phone,
+                                body_text=f"🛒 Got your cart!\n\n{build_cart_text(cart_items)}{note}\n\nTap *Checkout* to place the order.",
+                                buttons=[{"id": "catalog_checkout", "title": "Checkout"}],
+                                meta_access_token=tenant.meta_access_token,
+                            )
+                        else:
+                            await send_whatsapp_message(
+                                phone_number_id=tenant.whatsapp_phone_number_id,
+                                recipient_phone=customer_phone,
+                                message_text="Sorry, none of those items can be ordered right now"
+                                             + (f" ({'; '.join(problems)})" if problems else "") + ".",
+                                meta_access_token=tenant.meta_access_token,
+                            )
+                        continue
+                    elif msg_type in ("location", "contacts"):
+                        # Readable to the bot: "deliver here" with a pin, or a friend's number.
+                        user_text = inbox_text
                     elif msg_type == "image":
                         # -----------------------------------------------------------
                         # BANK RECEIPT IMAGE HANDLER
@@ -2545,7 +2952,23 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # MANAGER ORDER CONFIRM/REJECT VIA TEXT
                     # -----------------------------------------------------------
                     msg_upper = user_text.strip().upper()
-                    if msg_upper.startswith("CONFIRM ORD-") or msg_upper.startswith("REJECT ORD-"):
+
+                    # Booking requests the bot collected: the manager answers "CONFIRM BK-12" / "DECLINE BK-12".
+                    booking_answer = await handle_booking_command(db, tenant, user_text, customer_phone)
+                    if booking_answer is not None:
+                        await send_whatsapp_message(
+                            phone_number_id=tenant.whatsapp_phone_number_id,
+                            recipient_phone=customer_phone,
+                            message_text=booking_answer,
+                            meta_access_token=tenant.meta_access_token
+                        )
+                        continue
+
+                    # Only the manager's own number may confirm or reject an order. This used to accept the
+                    # command from ANY sender, so a customer who knew their own order number could confirm
+                    # their own payment by texting it.
+                    if (msg_upper.startswith("CONFIRM ORD-") or msg_upper.startswith("REJECT ORD-")) \
+                            and is_manager(tenant, customer_phone):
                         action = "confirmed" if msg_upper.startswith("CONFIRM") else "cancelled"
                         order_num = user_text.strip().split(" ", 1)[1].strip().upper()
                         stmt_ord = select(Order).where(Order.order_number == order_num, Order.tenant_id == tenant.id)
@@ -2629,6 +3052,10 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 meta_access_token=tenant.meta_access_token
                             )
                         elif order:
+                            if tenant.wa_catalog_id:
+                                # Stock went down: a product that just sold out shows as such in WhatsApp.
+                                asyncio.ensure_future(catalog_service.sync_later(
+                                    tenant.id, [i.product_id for i in order.items if i.product_id]))
                             bank_info = tenant.bank_details or "Please contact us for bank details."
                             item_lines = "\n".join(f"• {i.product_name} x{i.quantity} — Rs.{i.subtotal:,.2f}" for i in order.items)
 
@@ -2746,6 +3173,19 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                         "බඩු", "මිලදී", "ගන්න"
                     ])
 
+                    if is_shop_query and tenant.wa_catalog_id and not re.search(r'(?:buy|order|purchase|i want|i need)\s+\S', msg_lower_check):
+                        # The WhatsApp catalogue: browse, add to cart and send it inside WhatsApp.
+                        try:
+                            await send_whatsapp_catalog(
+                                phone_number_id=tenant.whatsapp_phone_number_id,
+                                recipient_phone=customer_phone,
+                                body_text="🛍️ Browse our products, add what you like to the cart and send it to us here.",
+                                meta_access_token=tenant.meta_access_token,
+                            )
+                            continue
+                        except Exception as catalog_err:
+                            logger.warning(f"Catalogue message failed, sending the list instead: {catalog_err}")
+
                     if is_shop_query:
                         products = await get_active_products(db, tenant.id)
                         if products:
@@ -2833,6 +3273,8 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                     # Who this is and where the chat stands - their name, how long since they last
                     # wrote, what the bot remembers - so the reply continues the conversation.
                     bot_config.conversation = build_conversation_context(conversation, history_records, incoming_row.id)
+                    # The live product list, so "how much for 3 of these?" is worked out by code, not guessed.
+                    bot_config.catalog = await load_catalog(db, tenant.id)
 
                     dynamic_kb = await get_dynamic_kb(tenant, db)
 
@@ -2885,6 +3327,10 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
                                 )
                         except Exception as voice_err:
                             logger.error(f"Could not reply with a voice note: {voice_err}")
+
+                    # If they are booking something, record it for the team once the details are complete
+                    # (looks at the chat a few seconds from now, after this reply has been saved).
+                    capture_booking_later(tenant.id, customer_phone)
 
                     # Send the reply as separate short messages with a typing-speed pause between them.
                     # Without a real token (local testing) nothing is sent, so nobody needs to wait.
@@ -3226,7 +3672,8 @@ async def list_products(tenant_id: int, db: AsyncSession = Depends(get_db), admi
 
 
 @app.post("/api/tenants/{tenant_id}/products", response_model=ProductResponse, status_code=status.HTTP_201_CREATED, tags=["Products"])
-async def create_product(tenant_id: int, product_in: ProductCreate, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+async def create_product(tenant_id: int, product_in: ProductCreate, background_tasks: BackgroundTasks,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     """Add a new product for a tenant."""
     ensure_tenant_access(admin, tenant_id)
     stmt = select(Tenant).where(Tenant.id == tenant_id)
@@ -3238,11 +3685,14 @@ async def create_product(tenant_id: int, product_in: ProductCreate, db: AsyncSes
     db.add(new_product)
     await db.commit()
     await db.refresh(new_product)
+    if tenant.wa_catalog_id:
+        background_tasks.add_task(catalog_service.sync_later, tenant.id, [new_product.id])
     return new_product
 
 
 @app.put("/api/products/{product_id}", response_model=ProductResponse, tags=["Products"])
-async def update_product(product_id: int, product_update: ProductUpdate, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+async def update_product(product_id: int, product_update: ProductUpdate, background_tasks: BackgroundTasks,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     """Update a product."""
     stmt = select(Product).where(Product.id == product_id)
     product = (await db.execute(stmt)).scalar_one_or_none()
@@ -3255,19 +3705,24 @@ async def update_product(product_id: int, product_update: ProductUpdate, db: Asy
 
     await db.commit()
     await db.refresh(product)
+    # Price, stock or picture changed: the WhatsApp catalogue follows.
+    background_tasks.add_task(catalog_service.sync_later, product.tenant_id, [product.id])
     return product
 
 
 @app.delete("/api/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Products"])
-async def delete_product(product_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+async def delete_product(product_id: int, background_tasks: BackgroundTasks,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     """Delete a product."""
     stmt = select(Product).where(Product.id == product_id)
     product = (await db.execute(stmt)).scalar_one_or_none()
     if not product or not can_access(admin, product.tenant_id):
         raise HTTPException(status_code=404, detail="Product not found")
 
+    tenant_id, gone = product.tenant_id, catalog_service.retailer_id(product)
     await db.delete(product)
     await db.commit()
+    background_tasks.add_task(catalog_service.sync_later, tenant_id, [-1], [gone])
     return None
 
 

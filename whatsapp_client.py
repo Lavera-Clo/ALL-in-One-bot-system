@@ -41,6 +41,24 @@ def _summary(kind: str, a: dict) -> str:
     if kind == "list":
         rows = [r.get("title") for s in (a.get("sections") or []) for r in s.get("rows", [])]
         return f"{a.get('body_text') or ''}\n[List: {', '.join(rows[:10])}]".strip()
+    if kind == "media":
+        label = {"image": "Image", "video": "Video", "audio": "Audio", "document": "Document",
+                 "sticker": "Sticker"}.get(a.get("media_type"), "File")
+        if a.get("voice"):
+            label = "Voice note"
+        detail = a.get("filename") if a.get("media_type") == "document" else ""
+        return " ".join(x for x in (f"[{label}]", detail, a.get("caption") or "") if x).strip()
+    if kind == "location":
+        # The same as a received location: the place, then a map link the inbox makes clickable.
+        place = " - ".join(x for x in (a.get("name"), a.get("address")) if x)
+        maps = f"https://maps.google.com/?q={a.get('latitude')},{a.get('longitude')}"
+        return f"[Location] {place}\n{maps}".replace("] \n", "]\n")
+    if kind == "contacts":
+        return "[Contact] " + ", ".join(f"{c.get('name')} {c.get('phone')}" for c in a.get("contacts") or [])
+    if kind == "catalog":
+        return f"{a.get('body_text') or ''}\n[View catalogue]".strip()
+    if kind == "products":
+        return f"{a.get('body_text') or ''}\n[Products: {len(a.get('retailer_ids') or [])}]".strip()
     return f"[{kind}]"
 
 
@@ -55,6 +73,10 @@ def describe_send_error(exc: Exception) -> str:
         if code in (131047, 131026) or "re-engagement" in str(err.get("message", "")).lower():
             return ("Outside the 24-hour window. WhatsApp only allows an approved template message "
                     "until this customer writes to you again.")
+        if code == 190 or exc.response.status_code == 401:
+            # Meta no longer accepts the access token: a temporary one (24 h) ran out, or it was replaced.
+            return ("WhatsApp access token expired or was replaced. Make a permanent System User token in "
+                    "Meta Business settings and paste it in Train Bot → Live on WhatsApp → Change number, then Retry.")
         message = err.get("error_user_msg") or err.get("message") or exc.response.text
         return f"WhatsApp refused the message: {str(message)[:300]}"
     return f"Could not reach WhatsApp: {exc.__class__.__name__}"
@@ -66,7 +88,9 @@ async def _notify(kind: str, a: dict, ok: bool, error: str = None, result=None) 
         wa_id = ((result.get("messages") or [{}])[0] or {}).get("id")
     for listener in list(_send_listeners):
         try:
-            await listener(a.get("phone_number_id"), a.get("recipient_phone"), _summary(kind, a), kind, ok, error, wa_id)
+            # A media send is recorded as what it is (image, video...), like a received one.
+            shown = a.get("media_type") if kind == "media" else kind
+            await listener(a.get("phone_number_id"), a.get("recipient_phone"), _summary(kind, a), shown, ok, error, wa_id)
         except Exception:  # noqa: BLE001 — a listener must never break sending
             logger.exception("WhatsApp send listener failed")
 
@@ -531,3 +555,123 @@ async def send_whatsapp_list_message(
             logger.error(f"Failed to send WhatsApp interactive list to {recipient_phone}: {str(e)}")
             raise e
 
+
+
+# ---------------------------------------------------------------------------
+# Every kind of message WhatsApp can carry (media_service.py, catalog_service.py)
+# ---------------------------------------------------------------------------
+
+def _mock_token(token: str) -> bool:
+    return token.startswith("EAA_placeholder") or "placeholder" in token
+
+
+async def _post_message(phone_number_id: str, meta_access_token: str, payload: dict) -> dict:
+    url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{phone_number_id}/messages"
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json={"messaging_product": "whatsapp", "recipient_type": "individual", **payload},
+                                     headers={"Authorization": f"Bearer {meta_access_token}"}, timeout=30.0)
+        response.raise_for_status()
+        return response.json()
+
+
+async def upload_whatsapp_media(phone_number_id: str, data: bytes, mime_type: str, filename: str,
+                                meta_access_token: str) -> str:
+    """Upload a file to Meta; returns the media id a message can send."""
+    if _mock_token(meta_access_token):
+        return f"mock-media-{len(data)}"
+    url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{phone_number_id}/media"
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(url, headers={"Authorization": f"Bearer {meta_access_token}"},
+                                     files={"file": (filename or "file", data, mime_type)},
+                                     data={"messaging_product": "whatsapp", "type": mime_type})
+        response.raise_for_status()
+        return response.json()["id"]
+
+
+@_reported("media")
+async def send_whatsapp_media(phone_number_id: str, recipient_phone: str, media_type: str, meta_access_token: str,
+                              media_id: str = "", link: str = "", caption: str = "", filename: str = "",
+                              voice: bool = False) -> dict:
+    """An image, video, audio, document or sticker, by uploaded media id or by public link.
+    voice=True (OGG/Opus audio) shows as a voice note with the play bar, not a music file."""
+    body = {"id": media_id} if media_id else {"link": link}
+    if voice and media_type == "audio":
+        body["voice"] = True
+    if caption and media_type in ("image", "video", "document"):
+        body["caption"] = caption
+    if filename and media_type == "document":
+        body["filename"] = filename
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] {media_type} to {recipient_phone}: {body}")
+        return {"status": "mock_sent", "messages": [{"id": f"wamid.mock.{media_type}"}]}
+    try:
+        return await _post_message(phone_number_id, meta_access_token,
+                                   {"to": recipient_phone, "type": media_type, media_type: body})
+    except httpx.HTTPStatusError as exc:
+        if not body.pop("voice", None) or exc.response.status_code != 400:
+            raise
+        # Older Graph API versions refuse the voice-note flag: send it as plain audio instead.
+        logger.warning("Voice-note flag refused; sending as plain audio")
+        return await _post_message(phone_number_id, meta_access_token,
+                                   {"to": recipient_phone, "type": media_type, media_type: body})
+
+
+@_reported("location")
+async def send_whatsapp_location(phone_number_id: str, recipient_phone: str, latitude: float, longitude: float,
+                                 meta_access_token: str, name: str = "", address: str = "") -> dict:
+    loc = {"latitude": latitude, "longitude": longitude}
+    if name:
+        loc["name"] = name
+    if address:
+        loc["address"] = address
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] location to {recipient_phone}: {loc}")
+        return {"status": "mock_sent"}
+    return await _post_message(phone_number_id, meta_access_token, {"to": recipient_phone, "type": "location", "location": loc})
+
+
+@_reported("contacts")
+async def send_whatsapp_contacts(phone_number_id: str, recipient_phone: str, contacts: list, meta_access_token: str) -> dict:
+    """contacts: [{"name": "Nimal", "phone": "+94771234567"}] - sent as contact cards."""
+    cards = [{"name": {"formatted_name": c["name"], "first_name": c["name"]},
+              "phones": [{"phone": c["phone"], "type": "CELL"}]} for c in contacts]
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] contacts to {recipient_phone}: {contacts}")
+        return {"status": "mock_sent"}
+    return await _post_message(phone_number_id, meta_access_token, {"to": recipient_phone, "type": "contacts", "contacts": cards})
+
+
+@_reported("catalog")
+async def send_whatsapp_catalog(phone_number_id: str, recipient_phone: str, body_text: str, meta_access_token: str,
+                                thumbnail_retailer_id: str = "") -> dict:
+    """The 'View catalogue' message: opens the business's WhatsApp catalogue."""
+    action = {"name": "catalog_message"}
+    if thumbnail_retailer_id:
+        action["parameters"] = {"thumbnail_product_retailer_id": thumbnail_retailer_id}
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] catalogue message to {recipient_phone}")
+        return {"status": "mock_sent"}
+    return await _post_message(phone_number_id, meta_access_token, {
+        "to": recipient_phone, "type": "interactive",
+        "interactive": {"type": "catalog_message", "body": {"text": body_text[:1024]}, "action": action}})
+
+
+@_reported("products")
+async def send_whatsapp_products(phone_number_id: str, recipient_phone: str, catalog_id: str, retailer_ids: list,
+                                 meta_access_token: str, body_text: str = "", header_text: str = "Our products") -> dict:
+    """One product (product message) or up to 30 (product_list), straight from the catalogue."""
+    retailer_ids = list(retailer_ids)[:30]
+    if len(retailer_ids) == 1:
+        interactive = {"type": "product", "action": {"catalog_id": catalog_id, "product_retailer_id": retailer_ids[0]}}
+        if body_text:
+            interactive["body"] = {"text": body_text[:1024]}
+    else:
+        interactive = {"type": "product_list", "header": {"type": "text", "text": header_text[:60]},
+                       "body": {"text": (body_text or "Tap a product to see it and add it to your cart.")[:1024]},
+                       "action": {"catalog_id": catalog_id,
+                                  "sections": [{"title": header_text[:24],
+                                                "product_items": [{"product_retailer_id": r} for r in retailer_ids]}]}}
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] products to {recipient_phone}: {retailer_ids}")
+        return {"status": "mock_sent"}
+    return await _post_message(phone_number_id, meta_access_token, {"to": recipient_phone, "type": "interactive", "interactive": interactive})
