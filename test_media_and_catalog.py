@@ -55,8 +55,13 @@ async def record_send(phone_number_id, recipient, text, kind, ok, error, wa_id):
 whatsapp_client.add_send_listener(record_send)
 
 
+META_REFUSES = set()      # media ids Meta won't hand over right now (an expired token)
+
+
 async def fake_download(media_id, token):
-    return {"img1": JPEG, "vid1": b"\x00\x00\x00\x18ftypmp4" + b"v" * 500, "doc1": b"%PDF-1.4 hello",
+    if media_id in META_REFUSES:
+        return b""
+    return {"late1": JPEG,"img1": JPEG, "vid1": b"\x00\x00\x00\x18ftypmp4" + b"v" * 500, "doc1": b"%PDF-1.4 hello",
             "stk1": b"RIFF....WEBP"}.get(media_id, b"")
 
 
@@ -186,6 +191,25 @@ async def main_async():
               "location: place name plus a map link")
         check("Kamal" in by_type["contacts"].content and "+94 77 222 3333" in by_type["contacts"].content, "contact card: name and number")
         check(by_type["reaction"].content == "[Reacted 👍]", "reaction shown")
+
+        print("\nA photo that couldn't be downloaded (expired token) is fetched later")
+        META_REFUSES.add("late1")
+        await client.post("/webhook", json=hook(CUSTOMER, {"type": "image", "image": {"id": "late1", "mime_type": "image/jpeg"}}, "w8"))
+        late = [r for r in await rows(tid) if r.wa_message_id == "w8"][0]
+        check(late.media_url is None and late.media_wa_id == "late1" and late.media_mime == "image/jpeg",
+              "Meta refused: no file yet, but WhatsApp's id for it is kept")
+        listed = (await client.get(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/messages", headers=A)).json()["messages"]
+        mine = next(m for m in listed if m["waMessageId"] == "w8")
+        check(mine["mediaPending"] and mine["media"] is None, "the inbox shows it as 'not downloaded yet'")
+        check(await media_service.fetch_missing(tid, CUSTOMER) == 0, "still refused: tried, and left for later")
+        META_REFUSES.discard("late1")           # the owner pasted a new token
+        await client.get(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/messages", headers=A)
+        late = [r for r in await rows(tid) if r.wa_message_id == "w8"][0]
+        check(late.media_url and served_size(late.media_url) == len(JPEG),
+              "opening the chat again fetches it, once Meta allows it")
+        listed = (await client.get(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/messages", headers=A)).json()["messages"]
+        mine = next(m for m in listed if m["waMessageId"] == "w8")
+        check(not mine["mediaPending"] and mine["media"]["url"] == late.media_url, "and the photo shows")
         listed = (await client.get(f"/api/tenants/{tid}/inbox/chats/{CUSTOMER}/messages", headers=A)).json()["messages"]
         img = next(m for m in listed if m["type"] == "image")
         check(img["media"] and img["media"]["mime"] == "image/jpeg" and img["media"]["url"].endswith(name),

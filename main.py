@@ -1704,6 +1704,7 @@ async def get_whatsapp_connection(
 async def connect_whatsapp(
     tenant_id: int,
     payload: WhatsAppConnectRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(get_current_admin)
 ):
@@ -1731,6 +1732,8 @@ async def connect_whatsapp(
     tenant.meta_access_token = token
     await db.commit()
     logger.info(f"Tenant {tenant.id}: WhatsApp connected to {number.get('display_phone_number')} by {admin.username}.")
+    # A new token: photos and voice notes the old (expired) one couldn't download are fetched now.
+    background_tasks.add_task(media_service.fetch_missing, tenant.id, None, 200)
     return {"message": f"Connected to {number.get('display_phone_number') or 'your number'}.", **number, **_whatsapp_payload(tenant)}
 
 
@@ -1755,12 +1758,17 @@ async def inbox_chats(tenant_id: int, db: AsyncSession = Depends(get_db), admin:
 
 
 @app.get("/api/tenants/{tenant_id}/inbox/chats/{phone}/messages", tags=["Inbox"])
-async def inbox_messages(tenant_id: int, phone: str, limit: int = Query(300, ge=1, le=1000),
+async def inbox_messages(tenant_id: int, phone: str, background_tasks: BackgroundTasks,
+                         limit: int = Query(300, ge=1, le=1000),
                          db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     """One customer's messages, oldest first (the most recent `limit`)."""
     await _get_tenant_or_404(db, tenant_id, admin)
     phone = _chat_phone(phone)
     conv = await get_conversation(db, tenant_id, phone)
+    messages = await chat_messages(db, tenant_id, phone, limit)
+    if any(m.get("mediaPending") for m in messages):
+        # A photo or voice note that couldn't be downloaded earlier: try again now.
+        background_tasks.add_task(media_service.fetch_missing, tenant_id, phone)
     return {
         "phone": phone,
         "name": conv.display_name if conv else "",
@@ -1769,7 +1777,7 @@ async def inbox_messages(tenant_id: int, phone: str, limit: int = Query(300, ge=
         "brief": load_conversation_brief(conv.memory) if conv else {},
         "bot_enabled": conv.bot_enabled if conv else True,
         "needs_human": bool(conv and conv.needs_human),
-        "messages": await chat_messages(db, tenant_id, phone, limit),
+        "messages": messages,
     }
 
 

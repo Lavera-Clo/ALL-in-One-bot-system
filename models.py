@@ -154,6 +154,9 @@ class ChatHistory(Base):
     media_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
     media_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # WhatsApp's id for a received file, kept until the copy is downloaded: if the download failed
+    # (an expired access token, Meta down) it is tried again later - Meta keeps files for 30 days.
+    media_wa_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="chat_histories")
 

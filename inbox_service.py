@@ -286,6 +286,8 @@ def message_payload(row: ChatHistory) -> Dict:
         "waMessageId": row.wa_message_id,      # Meta's id: how a phone matches messages it already has
         "media": ({"url": row.media_url, "mime": row.media_mime, "name": row.media_name}
                   if row.media_url else None),   # photo / video / audio / document / sticker
+        # Received, but the file couldn't be downloaded yet (it's tried again): show a placeholder.
+        "mediaPending": bool(row.media_wa_id and not row.media_url),
     }
 
 

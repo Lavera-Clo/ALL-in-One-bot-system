@@ -198,21 +198,68 @@ async def store_incoming(db: AsyncSession, tenant: Tenant, row: ChatHistory, mes
     media_id = media.get("id")
     if not media_id:
         return
+    # Kept first, so a failed download can be tried again (fetch_missing).
+    row.media_wa_id = media_id
+    row.media_mime = (media.get("mime_type") or "application/octet-stream").split(";")[0]
+    row.media_name = media.get("filename") or None
+    await db.commit()
+    await _download(db, tenant, row)
+
+
+async def _download(db: AsyncSession, tenant: Tenant, row: ChatHistory) -> bool:
+    """Fetch a received file from Meta and keep a copy. False when Meta wouldn't give it (yet)."""
     from whatsapp_client import download_whatsapp_media
     try:
-        data = await download_whatsapp_media(media_id, tenant.meta_access_token)
+        data = await download_whatsapp_media(row.media_wa_id, tenant.meta_access_token)
     except Exception as exc:  # noqa: BLE001 - the message is saved anyway; only the file is missing
         logger.warning(f"[media] download failed: {exc}")
-        return
+        data = b""
     if not data:
-        return
-    mime = media.get("mime_type") or "application/octet-stream"
-    row.media_url = save_file(data, mime, media.get("filename") or "")
-    row.media_mime = mime.split(";")[0]
-    row.media_name = media.get("filename") or None
+        logger.info(f"[media] tenant {tenant.id}: file {row.media_wa_id} not downloaded (will try again)")
+        return False
+    row.media_url = save_file(data, row.media_mime or "application/octet-stream", row.media_name or "")
     await db.commit()
     from inbox_service import announce
     await announce(tenant.id, row.customer_phone_number)
+    return True
+
+
+MEDIA_KEPT_DAYS = 30          # how long Meta keeps a received file
+_fetching: set = set()
+
+
+async def fetch_missing(tenant_id: int, phone: Optional[str] = None, limit: int = 50) -> int:
+    """
+    Try again to download received files that failed (usually: the access token had expired).
+    Runs after the token is replaced, and when a chat with a missing file is opened.
+    """
+    from datetime import timedelta
+    from sqlalchemy import select
+    from database import AsyncSessionLocal
+    from models import utc_now
+    key = (tenant_id, phone)
+    if key in _fetching:
+        return 0
+    _fetching.add(key)
+    got = 0
+    try:
+        async with AsyncSessionLocal() as db:
+            tenant = await db.get(Tenant, tenant_id)
+            q = select(ChatHistory).where(ChatHistory.tenant_id == tenant_id, ChatHistory.media_wa_id.is_not(None),
+                                          ChatHistory.media_url.is_(None),
+                                          ChatHistory.created_at >= utc_now() - timedelta(days=MEDIA_KEPT_DAYS))
+            if phone:
+                q = q.where(ChatHistory.customer_phone_number == phone)
+            rows = (await db.execute(q.order_by(ChatHistory.id.desc()).limit(limit))).scalars().all()
+            for row in rows:
+                if not await _download(db, tenant, row):
+                    break                         # Meta still refuses: no point asking for the rest now
+                got += 1
+    except Exception:  # noqa: BLE001
+        logger.exception("[media] retrying downloads failed")
+    finally:
+        _fetching.discard(key)
+    return got
 
 
 def payload(row: ChatHistory) -> Optional[dict]:

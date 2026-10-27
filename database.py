@@ -113,6 +113,7 @@ _COLUMN_MIGRATIONS = [
     ("calls", "recording_url", "TEXT"),
     ("knowledge_gaps", "suggested_answer", "TEXT"),
     ("conversations", "learned_upto_id", "INTEGER"),
+    ("chat_history", "media_wa_id", "VARCHAR(128)"),
 ]
 
 # Indexes for columns added by migration (create_all only indexes brand-new tables).
