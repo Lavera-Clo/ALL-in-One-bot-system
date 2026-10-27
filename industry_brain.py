@@ -41,16 +41,38 @@ def _rules(*specific: str) -> Tuple[str, ...]:
 
 # Topics any customer of any business brings up. A pack's own topics are checked first.
 _COMMON_TOPICS = {
+    # Pricing — English, Sinhala, Hindi, Arabic, Spanish, French, Malay
     "price": "prices", "cost": "prices", "rate": "prices", "fee": "prices",
     "ganan": "prices", "mila": "prices", "kiyada": "prices", "මිල": "prices", "ගණන්": "prices",
+    "precio": "prices", "prix": "prices", "harga": "prices", "سعر": "prices",
+    "कीमत": "prices", "daam": "prices", "kitna": "prices",
+    # Hours
     "open": "opening hours", "hours": "opening hours", "close": "opening hours",
+    "horario": "opening hours", "horaire": "opening hours", "waktu": "opening hours",
+    # Location
     "location": "how to find us", "address": "how to find us", "where": "how to find us",
+    "dirección": "how to find us", "adresse": "how to find us", "alamat": "how to find us",
+    "directions": "how to find us", "map": "how to find us", "parking": "parking",
+    # Delivery & shipping
     "deliver": "delivery & shipping", "courier": "delivery & shipping", "shipping": "delivery & shipping",
+    "dispatch": "delivery & shipping", "envío": "delivery & shipping", "livraison": "delivery & shipping",
+    "penghantaran": "delivery & shipping", "track": "order tracking", "tracking": "order tracking",
+    # Payment
     "cod": "cash on delivery", "cash on delivery": "cash on delivery",
     "pay": "payment options", "bank": "payment & bank transfer", "account": "payment & bank transfer",
+    "card": "payment options", "credit": "payment options", "debit": "payment options",
+    "invoice": "invoicing", "receipt": "receipts", "installment": "payment plans",
+    # Sizing
     "size": "sizing & measurements", "fit": "sizing & fit", "measurement": "sizing & measurements",
+    # Returns
     "exchange": "returns & exchanges", "return": "returns & exchanges", "refund": "returns & exchanges",
+    "warranty": "warranty", "guarantee": "warranty",
+    # Calendar
     "date": "today's schedule & calendar", "today": "today's schedule & calendar",
+    # Reviews & trust
+    "review": "reviews & ratings", "rating": "reviews & ratings", "feedback": "feedback",
+    # General
+    "cancel": "cancellations", "reschedule": "rescheduling", "complain": "complaints",
 }
 
 
@@ -452,6 +474,72 @@ _PACKS: Tuple[IndustryPack, ...] = (
                  "consulting", "consultancy", "insurance", "cleaning", "repair", "repairs", "bank", "it"),
         signals=("consulting", "consultancy", "accounting", "audit", "legal", "law firm", "lawyers",
                  "insurance", "agency", "clients", "tax", "cleaning service"),
+    ),
+    IndustryPack(
+        key="construction",
+        label="Construction, contractors & building",
+        persona="services",
+        role_title="Project Coordinator",
+        handoff_rules=_rules(
+            "Quotes, estimates and material cost breakdowns",
+            "Site visit scheduling and progress updates",
+            "Warranty claims and structural concerns",
+        ),
+        buttons=("🏗️ Our Services", "📋 Get a Quote"),
+        contact_button="📞 Contact Us",
+        intake=(
+            "What kind of project (renovation, new build, repair)",
+            "The size and location of the site",
+            "Their budget range",
+            "When they want to start",
+        ),
+        topics={
+            "build": "construction", "construct": "construction", "renovate": "renovations",
+            "quote": "a quote", "estimate": "a quote",
+            "material": "materials", "cement": "materials", "timber": "materials",
+            "plumb": "plumbing", "electric": "electrical", "wire": "electrical",
+            "paint": "painting", "tile": "tiling", "roof": "roofing",
+        },
+        guardrails=(
+            "Never quote a price for work without a site assessment. Take the details and let the team quote.",
+            "Never guarantee a completion date. Give ranges from the knowledge base only.",
+        ),
+        aliases=("builder", "contractor", "plumber", "electrician", "renovation", "handyman", "hardware"),
+        signals=("construction", "contractor", "builder", "renovation", "plumber", "electrician",
+                 "cement", "timber", "hardware", "building materials", "site", "architect"),
+    ),
+    IndustryPack(
+        key="logistics",
+        label="Logistics, freight & courier",
+        persona="services",
+        role_title="Shipment Support Agent",
+        handoff_rules=_rules(
+            "Lost, damaged or delayed shipments",
+            "Insurance claims and liability",
+            "Custom quotes for bulk or special cargo",
+        ),
+        buttons=("📦 Track Shipment", "🚚 Get a Quote"),
+        contact_button="📞 Contact Us",
+        intake=(
+            "The tracking number or order reference",
+            "Pickup and delivery locations",
+            "The weight and dimensions of the shipment",
+            "When they need it delivered by",
+        ),
+        topics={
+            "track": "tracking", "shipment": "a shipment", "parcel": "a parcel",
+            "freight": "freight services", "cargo": "cargo",
+            "pickup": "pickup scheduling", "collect": "pickup scheduling",
+            "warehouse": "warehousing", "customs": "customs clearance",
+            "quote": "a shipping quote",
+        },
+        guardrails=(
+            "Never promise a delivery date or time unless the tracking system or knowledge base confirms it.",
+            "Never accept liability for damage or loss in chat. Direct claims to the team.",
+        ),
+        aliases=("courier", "shipping", "freight", "cargo", "delivery_service", "warehouse", "3pl"),
+        signals=("logistics", "freight", "courier", "cargo", "shipment", "tracking", "warehouse",
+                 "pickup", "customs", "3pl", "last mile", "supply chain"),
     ),
     IndustryPack(
         key="generic",

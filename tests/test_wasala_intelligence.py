@@ -181,3 +181,20 @@ def test_general_knowledge_and_calendar_numbers_allowed(chat_models):
     assert "38 to 40" in reply.text
     assert not reply.unknown
 
+
+def test_singlish_conversational_detection():
+    assert ai_service.detect_language_intent("Meka thiyenawada?") == "singlish"
+    assert ai_service.detect_language_intent("Koheda shop eka thiyenne?") == "singlish"
+    assert ai_service.detect_language_intent("Cash on delivery danna puluwanda?") == "singlish"
+    assert ai_service.detect_language_intent("Do you have medium size in stock?") == "english"
+
+
+def test_gibberish_retail_and_commerce_immunity():
+    assert not ai_service.is_gibberish("cod available?")
+    assert not ai_service.is_gibberish("linen shirt size 38")
+    assert not ai_service.is_gibberish("bank slip payment")
+    assert not ai_service.is_gibberish("islandwide courier track")
+    # Meaningless keyboard smash should still be detected
+    assert ai_service.is_gibberish("zzxqwp kjfrs")
+
+
