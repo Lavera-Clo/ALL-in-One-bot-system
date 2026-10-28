@@ -321,18 +321,23 @@ _sessions: Dict[str, "CallSession"] = {}
 _agent_legs: Dict[int, "CallSession"] = {}      # call row id -> the website leg joined to it
 
 
-def ice_servers() -> List[dict]:
-    """STUN, and TURN when configured: shared by this server's call legs and the team's browsers."""
+def ice_servers(for_browser: bool = True) -> List[dict]:
+    """
+    STUN, plus the TURN relay for the team's browsers. CALL_TURN_URL may list several addresses,
+    comma-separated (e.g. UDP and TCP, for networks that block UDP). This server has a public
+    address, so its own call legs don't use the relay - it would only add a detour.
+    """
     servers = [{"urls": settings.CALL_STUN_SERVER}] if settings.CALL_STUN_SERVER else []
-    if settings.CALL_TURN_URL:
-        servers.append({"urls": settings.CALL_TURN_URL, "username": settings.CALL_TURN_USERNAME,
+    turn = [u.strip() for u in settings.CALL_TURN_URL.split(",") if u.strip()]
+    if turn and for_browser:
+        servers.append({"urls": turn, "username": settings.CALL_TURN_USERNAME,
                         "credential": settings.CALL_TURN_PASSWORD})
     return servers
 
 
 def _rtc() -> RTCPeerConnection:
     servers = [RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential"))
-               for s in ice_servers()]
+               for s in ice_servers(for_browser=False)]
     return RTCPeerConnection(RTCConfiguration(iceServers=servers))
 
 
