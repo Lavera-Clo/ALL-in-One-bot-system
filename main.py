@@ -264,11 +264,13 @@ async def lifespan(app: FastAPI):
 
     abandoned_cart_task = asyncio.create_task(abandoned_cart_worker())
     history_cleanup_task = asyncio.create_task(history_cleanup_worker())
+    recording_cleanup_task = asyncio.create_task(recording_cleanup_worker())
 
     yield
 
     abandoned_cart_task.cancel()
     history_cleanup_task.cancel()
+    recording_cleanup_task.cancel()
     logger.info("Shutting down WhatsApp AI Chatbot service...")
 
 
@@ -287,6 +289,19 @@ async def history_cleanup_worker():
         except Exception:
             logger.exception("History cleanup failed")
         await asyncio.sleep(HISTORY_CLEANUP_INTERVAL_SECONDS)
+
+
+async def recording_cleanup_worker():
+    """Every hour: delete call recordings older than CALL_RECORDING_DAYS (the call log stays)."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await call_service.delete_old_recordings()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Recording cleanup failed")
+        await asyncio.sleep(60 * 60)
 
 
 async def abandoned_cart_worker():

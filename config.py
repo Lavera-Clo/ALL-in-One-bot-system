@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     CALL_TEAM_RING_SECONDS: int = int(os.getenv("CALL_TEAM_RING_SECONDS", "15"))
     # Keep a recording of each call (the greeting tells callers). false = no recordings.
     CALL_RECORDING: bool = os.getenv("CALL_RECORDING", "true").strip().lower() not in ("0", "false", "no")
+    # Call recordings are deleted this many days after the call (the call log, summary and
+    # transcript stay). 0 = keep them.
+    CALL_RECORDING_DAYS: int = int(os.getenv("CALL_RECORDING_DAYS", "2"))
     # After a call a person handled: transcribe it, keep it in the chat history, and suggest the
     # facts they gave as answers for the owner to approve (call_service.learn_from_call).
     CALL_LEARNING: bool = os.getenv("CALL_LEARNING", "true").strip().lower() not in ("0", "false", "no")

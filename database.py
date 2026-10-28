@@ -111,6 +111,7 @@ _COLUMN_MIGRATIONS = [
     ("tenants", "catalog_error", "TEXT"),
     ("calls", "answered_by", "VARCHAR(150)"),
     ("calls", "recording_url", "TEXT"),
+    ("calls", "recording_deleted_at", "DATETIME"),
     ("knowledge_gaps", "suggested_answer", "TEXT"),
     ("conversations", "learned_upto_id", "INTEGER"),
     ("chat_history", "media_wa_id", "VARCHAR(128)"),

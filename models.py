@@ -516,6 +516,7 @@ class Call(Base):
     transferred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     answered_by: Mapped[str | None] = mapped_column(String(150), nullable=True)   # the team member who talked
     recording_url: Mapped[str | None] = mapped_column(Text, nullable=True)        # OGG, caller left / business right
+    recording_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # after CALL_RECORDING_DAYS
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)

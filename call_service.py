@@ -1260,11 +1260,51 @@ def payload(row: Call) -> dict:
             "purpose": row.purpose, "summary": row.summary, "transferred": row.transferred,
             "duration_seconds": row.duration_seconds, "transcript": transcript,
             "recording_url": row.recording_url, "answered_by": row.answered_by,
+            "recording_deleted": bool(row.recording_deleted_at),
+            "recording_kept_days": settings.CALL_RECORDING_DAYS,
             "live": bool(row.wa_call_id and row.wa_call_id in _sessions),
             # Always with the time zone: SQLite hands back naive UTC, which a browser would read as local time.
             "started_at": _aware(row.started_at).isoformat() if row.started_at else None,
             "ended_at": _aware(row.ended_at).isoformat() if row.ended_at else None,
             "created_at": _aware(row.created_at).isoformat() if row.created_at else None}
+
+
+async def delete_old_recordings(now=None) -> int:
+    """
+    Delete call recordings older than CALL_RECORDING_DAYS (the file on disk, and the link). The call
+    log, summary and transcript stay. Run every hour by main.recording_cleanup_worker.
+    """
+    import os
+    from database import AsyncSessionLocal as _Session
+    from media_service import MEDIA_DIR
+    days = settings.CALL_RECORDING_DAYS
+    if days <= 0:
+        return 0
+    now = now or utc_now()
+    cutoff = now - timedelta(days=days)
+    deleted = 0
+    async with _Session() as db:
+        rows = (await db.execute(select(Call).where(Call.recording_url.is_not(None)))).scalars().all()
+        for row in rows:
+            made = _aware(row.ended_at or row.created_at)
+            if made is None or made > cutoff:
+                continue
+            name = os.path.basename(row.recording_url or "")
+            path = os.path.join(MEDIA_DIR, name)
+            try:
+                if name and os.path.isfile(path):
+                    os.remove(path)
+            except OSError as exc:
+                logger.warning(f"[call] could not delete recording {name}: {exc}")
+                continue
+            row.recording_url = None
+            row.recording_deleted_at = now
+            deleted += 1
+        if deleted:
+            await db.commit()
+    if deleted:
+        logger.info(f"[call] deleted {deleted} call recording(s) older than {days} day(s)")
+    return deleted
 
 
 async def list_calls(db, tenant_id: int, phone: Optional[str] = None, limit: int = 100) -> List[dict]:

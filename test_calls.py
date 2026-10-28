@@ -516,6 +516,20 @@ async def test_team(tenant):
     check(len(left) / 48_000 > 2.0, f"the recording has the whole call ({len(left) / 48_000:.1f} s)")
     check(abs(main_hz(left.tobytes()) - CUSTOMER_HZ) < 40 and abs(main_hz(right.tobytes()) - MANAGER_HZ) < 40,
           "left = the customer, right = the team member")
+
+    print("\nRecordings are deleted after 2 days; the call log stays")
+    from datetime import timedelta
+    from models import utc_now
+    path = os.path.join(os.environ["MEDIA_DIR"], name)
+    check(await cs.delete_old_recordings(now=utc_now() + timedelta(days=1)) == 0 and os.path.exists(path),
+          "a day later the recording is still there")
+    check(await cs.delete_old_recordings(now=utc_now() + timedelta(days=3)) >= 1 and not os.path.exists(path),
+          "after 2 days the file is deleted")
+    row = await row_for("wacid.team.1")
+    check(row.recording_url is None and row.recording_deleted_at and row.summary is not None and row.status == "completed",
+          "the call itself stays in the list, with its summary")
+    check(cs.payload(row)["recording_deleted"] and cs.payload(row)["recording_kept_days"] == 2,
+          "and the website can say the recording was deleted after 2 days")
     await phone.close()
     await browser.close()
 
