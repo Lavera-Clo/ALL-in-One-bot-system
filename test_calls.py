@@ -1032,6 +1032,10 @@ async def test_latency(tenant):
     browser = await browser_offer()
     answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
     await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+    # As on a real call: the team's browser is connected and sending a few seconds before the
+    # customer's WhatsApp side is (accept, then its own connection). Measured live: everything the
+    # team member said reached the customer ~3 s late, the other way round had no delay.
+    await asyncio.sleep(3.0)
     await connect_caller(phone, task)
     await asyncio.sleep(1.5)
     first = [await lag(phone, browser, MANAGER_HZ), await lag(browser, phone, CUSTOMER_HZ)]
