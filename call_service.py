@@ -99,6 +99,7 @@ FILLERS = {
     "sinhala": ["හරි, පොඩ්ඩක් ඉන්න.", "හරි, මම බලන්නම්.", "හරි, එක තත්පරයක්."],
 }
 GREETING_WAIT = 3.0            # longest the phone keeps ringing while the greeting is made
+CLAIM_GRACE = 25.0             # a person pressed Answer: how long their browser may take to connect
 FILLER_AFTER = 1.0             # seconds of thinking before a filler is said
 FILLER_EARLY_SPEECH = 1.2      # said this long or longer: surely words, so the filler clock starts at once
 FILLER_AFTER_HEARD = 0.3       # shorter: start it only once speech-to-text found words (not a cough)
@@ -391,6 +392,10 @@ class CallSession:
         self.taken_by: Optional[str] = None
         self.pending_agent: Optional["CallSession"] = None
         self.ring_decided = asyncio.Event()     # incoming: the team answered, or let the AI take it
+        # A person pressed Answer / Take over and their browser is connecting: the AI is silent from
+        # this moment (not only once the audio is joined), and the call is held for them.
+        self.claimed_by: Optional[str] = None
+        self.team_joined = asyncio.Event()
         self.label = f"{call_row_id}/{role}"    # in every log line about this leg
         self._monitoring = False
         self.speech_turn = 0                    # +1 when the caller talks over the bot: stop the rest
@@ -483,8 +488,12 @@ class CallSession:
 
     # --- speaking ------------------------------------------------------------
 
+    def ai_silenced(self) -> bool:
+        """A person is on this call, or about to be: the AI says nothing."""
+        return self.partner is not None or self.claimed_by is not None
+
     async def say(self, text: str, record: bool = True) -> None:
-        if not text or self.ended.is_set():
+        if not text or self.ended.is_set() or self.ai_silenced():
             return
         turn = self.speech_turn
         # All sentences are made at once; each is played as soon as it's ready, in order.
@@ -498,21 +507,21 @@ class CallSession:
                 pcm = await pending
             except Exception:  # noqa: BLE001
                 pcm = b""
-            if self.ended.is_set() or self.speech_turn != turn:
-                return                      # hung up, or talked over: don't say the rest
+            if self.ended.is_set() or self.speech_turn != turn or self.ai_silenced():
+                return                      # hung up, talked over, or a person took over: stop
             if pcm:
                 self.speaker.say(pcm)
 
     async def _filler_if_slow(self, after: float = FILLER_AFTER) -> None:
         """Said when the answer takes more than `after` seconds: "Okay, one moment." in their language."""
         await asyncio.sleep(after)
-        if self.ended.is_set() or self.speaker.talking or self.partner is not None:
+        if self.ended.is_set() or self.speaker.talking or self.ai_silenced():
             return
         options = filler_lines(self.language)
         text = options[self.fillers_used % len(options)]
         self.fillers_used += 1
         pcm = await speech_soon(text)
-        if pcm and not self.ended.is_set() and not self.speaker.talking:
+        if pcm and not self.ended.is_set() and not self.speaker.talking and not self.ai_silenced():
             self.speaker.say(pcm)
 
     def warm_up(self) -> None:
@@ -563,6 +572,9 @@ class CallSession:
             words = await business_words(db, tenant)
         heard = await understand_voice_note(wav_bytes(pcm), "audio/wav", self.business, words,
                                             second_opinion_seconds=STT_SECOND_OPINION)
+        if self.ai_silenced():
+            self._stop_filler()
+            return                          # a person took the call while this was being heard
         if heard.status != "ok" or not heard.text.strip() or heard.unclear:
             self._stop_filler()
             if heard.status == "ok" or heard.text.strip():
@@ -585,6 +597,8 @@ class CallSession:
             return
         reply, handoff = await ai_reply(self.tenant_id, self.phone, said, self.purpose)
         self._stop_filler()
+        if self.ai_silenced():
+            return                          # a person took over while the AI was thinking: drop it
         await self.say(reply)
         if handoff:
             await self.wait_until_quiet()
@@ -682,6 +696,8 @@ class CallSession:
         self.partner, leg.partner = leg, self
         if self.listener:
             self.listener.paused = True
+        self.speech_turn += 1               # any sentence still being made is dropped
+        self._stop_filler()
         self.speaker.stop_talking()
         if leg.remote is not None:
             self.speaker.forward = leg.relay.subscribe(leg.remote)
@@ -692,8 +708,10 @@ class CallSession:
         """A person in the website takes this call (answered it ringing, took it over from the AI, or placed it)."""
         self.handed_over = True
         self.taken_by = who
+        self.claimed_by = who
         self._span = None if self._span is None else (self._span[0], self._span[1], who)
         self.join(leg)
+        self.team_joined.set()
         async with AsyncSessionLocal() as db:
             await _set_row(db, self.call_row_id, status="with_team", answered_by=who)
 
@@ -701,6 +719,7 @@ class CallSession:
         """The manager hung up but the customer is still there: the AI picks up again."""
         self._close_span()
         self.partner = None
+        self.claimed_by = None
         self.speaker.forward = None
         self.handed_over = False
         if self.listener:
@@ -1107,6 +1126,14 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
             except asyncio.TimeoutError:
                 pass
             session.ring_decided.set()
+            if session.claimed_by and not session.taken_by:
+                # Someone pressed Answer and their audio is still connecting: wait for them, not the AI.
+                try:
+                    await asyncio.wait_for(session.team_joined.wait(), timeout=CLAIM_GRACE)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[call] {session.label}: {session.claimed_by} pressed Answer but their audio "
+                                   f"didn't connect in {CLAIM_GRACE:.0f}s; the AI answers")
+                    session.claimed_by = None
             if session.ended.is_set():
                 return                      # they hung up while it rang
         if not session.taken_by:
@@ -1192,22 +1219,59 @@ async def team_answer(tenant: Tenant, call_row_id: int, offer_sdp: str, who: str
     session = _customer_session(call_row_id)
     if session is None or session.tenant_id != tenant.id:
         raise LookupError("This call has ended.")
-    if session.partner is not None:
-        raise ValueError(f"{session.taken_by or 'Someone'} is already on this call.")
+    if session.partner is not None or (session.claimed_by and session.claimed_by != who):
+        raise ValueError(f"{session.taken_by or session.claimed_by or 'Someone'} is already on this call.")
+    session.claimed_by = who                      # in case the website didn't claim it first
+    session.speech_turn += 1
+    session.speaker.stop_talking()
     leg = await _browser_leg(tenant, session.phone, call_row_id, offer_sdp)
     session.ring_decided.set()
-    session.speaker.stop_talking()
     await session.join_team(leg, who)
     _agent_legs[call_row_id] = leg
     return leg.pc.localDescription.sdp
 
 
-async def let_ai_answer(tenant: Tenant, call_row_id: int) -> bool:
+async def claim_call(tenant: Tenant, call_row_id: int, who: str) -> bool:
+    """
+    Pressed Answer (or Take over): silence the AI and hold the call while this person's audio connects.
+    If they never connect, the claim runs out (CLAIM_GRACE) and the AI carries on.
+    """
+    session = _customer_session(call_row_id)
+    if session is None or session.tenant_id != tenant.id:
+        raise LookupError("This call has ended.")
+    if session.partner is not None or (session.claimed_by and session.claimed_by != who):
+        raise ValueError(f"{session.taken_by or session.claimed_by or 'Someone'} is already on this call.")
+    session.claimed_by = who
+    session.speech_turn += 1
+    session._stop_filler()
+    session.speaker.stop_talking()
+    logger.info(f"[call] {session.label}: {who} is taking the call; the AI is silent")
+    if session.answered.is_set():                 # taking over from the AI: give up if they never arrive
+        async def expire():
+            await asyncio.sleep(CLAIM_GRACE)
+            if session.claimed_by == who and session.partner is None and not session.ended.is_set():
+                logger.warning(f"[call] {session.label}: {who}'s audio never connected; the AI carries on")
+                session.claimed_by = None
+                await session.say(line("back", session.language), record=False)
+        session.tasks.append(asyncio.ensure_future(expire()))
+    return True
+
+
+async def release_call(tenant: Tenant, call_row_id: int) -> bool:
+    """The person's browser couldn't connect (or they changed their mind): back to the AI at once."""
     session = _customer_session(call_row_id)
     if session is None or session.tenant_id != tenant.id:
         return False
+    if session.partner is None and session.claimed_by:
+        session.claimed_by = None
+        if session.answered.is_set():
+            await session.say(line("back", session.language), record=False)
     session.ring_decided.set()
     return True
+
+
+async def let_ai_answer(tenant: Tenant, call_row_id: int) -> bool:
+    return await release_call(tenant, call_row_id)
 
 
 async def team_dial(db, tenant: Tenant, phone: str, offer_sdp: str, who: str) -> dict:

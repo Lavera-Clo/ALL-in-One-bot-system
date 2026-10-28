@@ -2009,6 +2009,20 @@ async def team_answer_api(tenant_id: int, call_id: int, payload: BrowserCallOffe
     return {"sdp": sdp}
 
 
+@app.post("/api/tenants/{tenant_id}/calls/{call_id}/claim", tags=["Calls"])
+async def claim_call_api(tenant_id: int, call_id: int,
+                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Answer / Take over was pressed: the AI goes silent at once and the call is held while the audio connects."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        await call_service.claim_call(tenant, call_id, admin.full_name or admin.username)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
+
+
 @app.post("/api/tenants/{tenant_id}/calls/{call_id}/to-ai", tags=["Calls"])
 async def let_ai_answer_api(tenant_id: int, call_id: int,
                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):

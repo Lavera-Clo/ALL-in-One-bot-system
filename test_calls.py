@@ -245,10 +245,16 @@ async def test_incoming(tenant):
     check(await wait_for(lambda: len(replies) == 1, 10), "they spoke, they stopped: the AI got what they said")
     check(await phone.hears(BOT_HZ), "and the caller hears the spoken answer")
 
-    async with AsyncSessionLocal() as db:
-        turns = (await db.execute(select(ChatHistory).where(ChatHistory.customer_phone_number == CUSTOMER,
-                                                            ChatHistory.message_type == "call"))).scalars().all()
-    texts = [t.content for t in turns]
+    # The bot's words are saved alongside speaking them (the caller doesn't wait for the database).
+    texts = []
+    for _ in range(30):
+        async with AsyncSessionLocal() as db:
+            turns = (await db.execute(select(ChatHistory).where(ChatHistory.customer_phone_number == CUSTOMER,
+                                                                ChatHistory.message_type == "call"))).scalars().all()
+        texts = [t.content for t in turns]
+        if any("We open at 8" in t for t in texts):
+            break
+        await asyncio.sleep(0.1)
     check(any("what time do you open" in t for t in texts) and any("We open at 8" in t for t in texts),
           "both sides of the call are in the chat history, so the chat bot remembers the call")
 
@@ -906,6 +912,103 @@ async def test_speed(tenant):
         voice_service.understand_voice_note = real_hear
 
 
+async def test_claim(tenant):
+    print("\nA person answers but their audio is slow to connect (the bug: the AI answered too)")
+    import realtime
+    realtime.call_desks.active[tenant.id] = [object()]
+    settings.CALL_TEAM_RING_SECONDS = 2
+    cs._speech_cache.clear()
+    phone, task = await ringing_call(tenant, "wacid.claim.1")
+    row = await row_for("wacid.claim.1")
+    check(await cs.claim_call(tenant, row.id, "Kasun"), "Answer pressed: the call is claimed straight away")
+    await asyncio.sleep(3.5)                       # the 2 s ring runs out while the browser is still connecting
+    check(not any(b.get("action") == "accept" for b in api_calls), "the ring ran out, but the call is held for Kasun, not given to the AI")
+    browser = await browser_offer()
+    answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+    await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+    await connect_caller(phone, task)
+    session = cs._sessions["wacid.claim.1"]
+    await asyncio.sleep(1.0)
+    check(not any(t["who"] == "bot" for t in session.transcript), "the AI never said a word")
+    browser.talk(MANAGER_HZ, 4.0)
+    check(await phone.hears(MANAGER_HZ), "the customer hears Kasun")
+    check(not await phone.hears(BOT_HZ, within=1.5), "and no AI voice")
+    await session.hang_up()
+    await phone.close()
+    await browser.close()
+
+    print("\nTaking over while the AI is in the middle of a reply")
+    settings.CALL_TEAM_RING_SECONDS = 0
+    real_reply = cs.ai_reply
+
+    async def slow_reply(tenant_id, phone_no, said, note=""):
+        await asyncio.sleep(3)
+        return "We open at nine in the morning and close at eight.", False
+
+    cs.ai_reply = slow_reply
+    try:
+        phone = await incoming_call(tenant, "wacid.claim.2")
+        session = cs._sessions["wacid.claim.2"]
+        check(await phone.hears(BOT_HZ), "the AI is on the call")
+        await asyncio.sleep(1.5)
+        heard_queue.append("what time do you open")
+        phone.talk(CUSTOMER_HZ, 1.5)
+        await asyncio.sleep(2.8)                   # the AI has heard it and is thinking
+        row = await row_for("wacid.claim.2")
+        await cs.claim_call(tenant, row.id, "Kasun")
+        check(not session.speaker.talking, "Take over: anything the AI was saying stops at once")
+        await asyncio.sleep(4)                     # the AI's reply arrives after the person took over
+        check(not any("nine in the morning" in t["text"] for t in session.transcript),
+              "the AI's late reply is dropped, never spoken")
+        browser = await browser_offer()
+        answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+        await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+        await asyncio.sleep(0.8)
+        await session.say("This must not be heard.")
+        check(not session.speaker.talking and session.transcript[-1]["text"] != "This must not be heard.",
+              "while a person is on the call the AI can't speak at all")
+        await session.hang_up()
+        await phone.close()
+        await browser.close()
+    finally:
+        cs.ai_reply = real_reply
+
+    print("\nThe person's audio never connects")
+    settings.CALL_TEAM_RING_SECONDS = 1
+    old_grace = cs.CLAIM_GRACE
+    cs.CLAIM_GRACE = 2
+    phone, task = await ringing_call(tenant, "wacid.claim.3")
+    row = await row_for("wacid.claim.3")
+    await cs.claim_call(tenant, row.id, "Kasun")
+    await connect_caller(phone, task)              # ring 1 s + grace 2 s, then the AI answers
+    check(await phone.hears(BOT_HZ), "after the grace time the AI answers instead of leaving silence")
+    await cs._sessions["wacid.claim.3"].hang_up()
+    await phone.close()
+    cs.CLAIM_GRACE = old_grace
+
+    print("\nThe website gives the call back when its microphone fails")
+    settings.CALL_TEAM_RING_SECONDS = 30
+    phone, task = await ringing_call(tenant, "wacid.claim.4")
+    row = await row_for("wacid.claim.4")
+    await cs.claim_call(tenant, row.id, "Kasun")
+    t0 = time.monotonic()
+    await cs.release_call(tenant, row.id)          # what the website does after a failed connect
+    await connect_caller(phone, task)
+    check(time.monotonic() - t0 < 4 and await phone.hears(BOT_HZ), "the AI answers straight away")
+    try:
+        await cs.claim_call(tenant, row.id, "Ruwan")
+        other = await browser_offer()
+        await cs.team_answer(tenant, row.id, other.pc.localDescription.sdp, "Ruwan")
+        await cs.claim_call(tenant, row.id, "Kasun")
+        check(False, "two people")
+    except ValueError as e:
+        check("Ruwan" in str(e), "two people pressing Answer: the second is told who has it")
+        await other.close()
+    await cs._sessions["wacid.claim.4"].hang_up()
+    await phone.close()
+    settings.CALL_TEAM_RING_SECONDS = 0
+
+
 async def test_portal(tenant):
     print("\nPortal")
     async with AsyncSessionLocal() as db:
@@ -963,6 +1066,7 @@ async def main_async():
     await test_two_calls(t)
     await test_learning(t)
     await test_speed(t)
+    await test_claim(t)
     await test_portal(t)
     for s in list(cs._sessions.values()):
         await s.finish()
