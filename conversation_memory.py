@@ -203,24 +203,7 @@ def context_prompt(ctx: Optional[ConversationContext]) -> str:
     return "\n".join(lines) + "\n"
 
 
-CONTINUITY_RULES = (
-    "--- CONTINUING THE CONVERSATION LIKE A PERSON ---\n"
-    "1. Read the chat so far before answering. Reply to what they mean in context: 'how much?' after "
-    "you described a package means that package; 'ok' after you asked a question is their answer.\n"
-    "2. Never ask for something they already told you (see 'Details they already gave' and the chat). "
-    "Use it: 'For 120 guests on the 14th, ...'.\n"
-    "3. Pick up where you left off. If your last message asked them something and they answered, "
-    "acknowledge it in a few words and move to the next step. If they ignored it, don't repeat it.\n"
-    "4. If they change topic, follow them - keep their earlier goal in mind and come back to it later "
-    "if it is still open.\n"
-    "5. Match them: a one-word message gets a short reply; a worried message gets warmth first; "
-    "a joke can get a light touch back.\n"
-    "6. Don't re-introduce yourself or the business in an ongoing chat, and don't repeat information "
-    "you already gave unless they ask - refer to it ('like I mentioned, ...').\n"
-    "7. If they ask the same thing again, they may not have understood: explain it differently and "
-    "more simply, rather than pasting the same answer.\n"
-    "------------------------------------------\n"
-)
+# (How to continue a conversation like a person is part of ai_service.REPLY_RULES, rules 11-13.)
 
 
 # ---------------------------------------------------------------------------

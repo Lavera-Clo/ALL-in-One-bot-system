@@ -76,8 +76,10 @@ def test_prompt_carries_the_wasala_rules(chat_models):
     reply_to("hello")
     system_prompt = fake.calls[0][1][0]["content"]
 
-    for rule in ("REASONING PROTOCOL", "SOUND LIKE A REAL PERSON", "GREET ONCE", "HAVE A VIEW",
-                 "REAL-TIME CALENDAR", "general knowledge", "never point out that they asked"):
+    # One merged rule set now (ai_service.REPLY_RULES); the same rules, each said once.
+    for rule in ("THINK FIRST, THEN REPLY", "HOW TO REPLY", "Greet only at the very start", "recommend one option",
+                 "REAL-TIME CALENDAR", "General knowledge", "never point out that they asked",
+                 "you DON'T KNOW - the business may well have it"):
         assert rule in system_prompt, rule
     assert ai_service.business_now().strftime("%B %d, %Y") in system_prompt
     # The robotic versions the Wasala bot replaced must be gone

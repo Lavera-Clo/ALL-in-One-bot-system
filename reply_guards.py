@@ -103,6 +103,8 @@ def one_question(reply: str) -> str:
     text = (reply or "").strip()
     if text.count("?") < 2:
         return text
+    # Models sometimes run a question straight into the next sentence ("egg?*Kottu* is..."): split there too.
+    text = re.sub(r"\?(?=[*_A-Za-z඀-෿])", "? ", text)
     parts = re.split(r"(?<=[.!?])(\s+)", text)       # sentence, separator, sentence, ...
     out, seen, drop_sep = [], False, False
     for i, part in enumerate(parts):
@@ -168,6 +170,76 @@ def wrong_language(customer_lang: str, reply: str, message: str = "") -> Tuple[b
         got = reply_language(reply or "")
         return got == "english", got
     return False, ""
+
+
+# --- "We don't have X" when nobody said so ---------------------------------------------
+#
+# The knowledge base not mentioning a play area doesn't mean there isn't one. Measured: asked "is
+# there a kids play area?" with a knowledge base that doesn't say, the bot answered "We don't have a
+# kids play area" - a made-up "no" that loses the customer. Like the number guard, this catches a
+# denial of something the knowledge base never mentions, so the reply can be redrafted.
+
+_DENIAL = re.compile(
+    r"\b(?:we|i|they)\s+(?:don'?t|do\s+not|doesn'?t|does\s+not|can'?t|cannot|won'?t)\s+"
+    r"(?:have|offer|provide|sell|stock|carry|serve|do|allow|accept|deliver\s+to|deliver|take|support|run)\s+"
+    r"(?P<a>[^.!?\n,;]{2,60})"
+    r"|\bthere(?:'s|\s+is|\s+are|\s+isn'?t\s+an?y?|\s+aren'?t\s+any)\s+(?:no\s+)?(?P<b>[^.!?\n,;]{2,60})"
+    r"|\bwe\s+(?:have|offer)\s+no\s+(?P<c>[^.!?\n,;]{2,60})"
+    r"|\bno\s+(?P<d>[a-z][a-z -]{2,40}?)\s+(?:here|available|on\s+site|onsite|at\s+the)\b"
+    r"|\b(?P<e>[a-z][a-z -]{2,40}?)\s+(?:isn'?t|is\s+not|aren'?t|are\s+not)\s+(?:available|offered|provided|possible)\b",
+    re.I)
+_FILLER = {"a", "an", "any", "the", "some", "our", "your", "you", "it", "that", "this", "these", "those", "here", "there",
+           "at", "in", "on", "for", "to", "of", "with", "and", "or", "right", "now", "currently", "yet", "unfortunately",
+           "sorry", "just", "really", "actually", "kind", "type", "types", "one", "ones", "thing", "things", "option",
+           "options", "service", "services", "facility", "facilities", "moment", "today", "place", "shop", "store",
+           "anything", "something", "that's", "much", "many", "more", "other", "like", "be", "is", "are", "have", "has",
+           "can", "will", "would", "able", "allowed", "available", "offered", "provided", "possible", "info", "details",
+           "information", "it's", "know", "sure", "mate", "dear", "machan"}
+# Not about what the business has: "I don't have that information", "we don't do refunds by WhatsApp"...
+_ABOUT_US = re.compile(r"\b(information|info|details?|records?|access|answers?|updates?|idea|confirmation|figures?|exact|data|clue|number for|that (?:yet|right now|with me|in front of me))\b", re.I)
+
+
+def _words(text: str) -> list:
+    return [w for w in re.findall(r"[a-z][a-z'-]{2,}", (text or "").lower()) if w not in _FILLER]
+
+
+def _known(word: str, known: str) -> bool:
+    stems = {word, word.rstrip("s"), word[:-2] if word.endswith("es") else word, word[:-3] + "y" if word.endswith("ies") else word}
+    return any(re.search(r"\b" + re.escape(stem), known) for stem in stems if len(stem) >= 3)
+
+
+def _limited(word: str, known: str) -> bool:
+    """The knowledge base states a limit around this word: "Delivery to Colombo only", "only on weekends"."""
+    for m in re.finditer(r"\b(?:only|just|except|limited to)\b", known):
+        window = known[max(0, m.start() - 40): m.end() + 40]
+        if _known(word, window):
+            return True
+    return False
+
+
+def denies_unlisted(reply: str, known_text: str) -> Optional[str]:
+    """
+    The thing the reply says the business doesn't have, when nothing it was given says so - or None.
+    `known_text` is everything the bot was told (knowledge base, products, the owner's settings).
+    """
+    known = (known_text or "").lower()
+    for m in _DENIAL.finditer(reply or ""):
+        thing = next(g for g in m.groups() if g)
+        if _ABOUT_US.search(thing):
+            continue
+        words = _words(thing)[:4]
+        if not words or any(_known(w, known) for w in words):
+            continue
+        # "We don't deliver to Galle, only Colombo": a "no" that follows from a limit the knowledge
+        # base states ("Delivery to Colombo only") - fine.
+        start = max(reply.rfind(".", 0, m.start()), reply.rfind("\n", 0, m.start())) + 1
+        stop = min([i for i in (reply.find(".", m.end()), reply.find("\n", m.end())) if i != -1] or [len(reply)])
+        sentence = reply[start:stop]
+        only = re.search(r"\b(?:only|just)\b([^.!?\n]{0,40})", sentence, re.I)
+        if only and any(_limited(w, known) for w in _words(only.group(1))):
+            continue
+        return thing.strip()
+    return None
 
 
 # --- A line telling them a person will follow up ----------------------------------------

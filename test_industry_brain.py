@@ -72,7 +72,8 @@ def history(*user_messages):
 
 def test_packs():
     print("\nIndustry packs")
-    check(len(brain.INDUSTRY_KEYS) == 12 and "generic" in brain.INDUSTRY_KEYS, "12 industries, including generic")
+    check(len(brain.INDUSTRY_KEYS) == 14 and "generic" in brain.INDUSTRY_KEYS,
+          "14 industries (construction and logistics were added), including generic")
 
     aliases = {}
     for key in brain.INDUSTRY_KEYS:
@@ -326,7 +327,7 @@ async def test_api(client: httpx.AsyncClient):
     profile = (await client.get(f"/api/tenants/{resort.id}/bot-profile")).json()
     check(profile["industry"] == "hospitality" and profile["persona_template"] == "hospitality",
           "GET shows the resolved industry and persona")
-    check(len(profile["available_industries"]) == 12 and "handoff_rules" in profile["available_industries"][0],
+    check(len(profile["available_industries"]) == 14 and "handoff_rules" in profile["available_industries"][0],
           "GET lists every industry with its defaults for the portal")
 
     res = await client.patch(f"/api/tenants/{resort.id}/bot-profile", json={"industry": "not-a-real-industry"})

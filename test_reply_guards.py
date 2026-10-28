@@ -77,6 +77,10 @@ def test_one_question():
     check(g.one_question("It is Rs 850. Want it delivered?") == "It is Rs 850. Want it delivered?", "a single question is untouched")
     check(g.one_question("Rs 950 each. Which one? Chicken or egg? Thanks!") == "Rs 950 each. Which one? Thanks!",
           "statements around dropped questions stay, with their spacing")
+    # Measured (a fallback model): the question run straight into the next sentence, then repeated.
+    run_on = "chicken kottu da egg da?*Kottu* (chicken or egg) price is *Rs 950*.\n\nchicken kottu da egg da?"
+    check(g.one_question(run_on) == "chicken kottu da egg da? *Kottu* (chicken or egg) price is *Rs 950*.",
+          "a question with no space after it is still seen, and its repeat is dropped")
     check(g.without_questions("I can't tell you what medicine to take, but a doctor can.\n\nWould you like me to check a slot?")
           == "I can't tell you what medicine to take, but a doctor can.", "a hand-over reply loses its trailing question")
 
@@ -147,6 +151,25 @@ async def test_pipeline():
 
     reply, _ = await pipeline([wrap("Delivery is Rs 250. Which area? And what time? And how many people?")], "delivery cost")
     check(reply.text.count("?") == 1, "three stacked questions become one")
+
+    print("\nA 'no' the knowledge base never said")
+    reply, calls = await pipeline([wrap("We don't have a kids play area here, sorry!"),
+                                   wrap("Good question - let me check that with the team for you. [NOT_IN_KNOWLEDGE_BASE]")],
+                                  "is there a kids play area?")
+    check(len(calls) == 2 and "doesn't have 'a kids play area" in calls[1][0]["content"] and "kids play area" not in reply.text.lower()
+          and "check" in reply.text and reply.unknown,
+          "'we don't have a play area' (not in the knowledge base) is redrafted to 'I'll check', and the question is filed")
+    reply, calls = await pipeline([wrap("We don't have a pool, sorry."), wrap("We don't have a pool.")], "do you have a pool?")
+    check(reply.unknown and "pool" not in reply.text.lower(), "redraft says it again: a safe 'I'll check' instead")
+    kb = "Rice Rs 450. Parking for 20 cars. Delivery to Colombo only. No pets allowed inside."
+    for text, flagged in [("We don't have a kids play area here.", True), ("Sorry, we don't offer wifi.", True),
+                          ("We have no outdoor seating.", True), ("No buffet available on weekdays.", True),
+                          ("We don't have a pool, only parking.", True),
+                          ("We don't deliver to Galle, only Colombo.", False), ("We don't allow pets inside.", False),
+                          ("I don't have that detail - let me check with the team.", False),
+                          ("Valet parking isn't available.", False), ("We open at 8, see you!", False)]:
+        check(bool(g.denies_unlisted(text, kb)) == flagged,
+              f"{'caught' if flagged else 'fine'}: {text}")
 
     print("\nWhere they left off")
     ctx = ConversationContext(tenant_id=1, phone="9477", customer_name="Dinesh", first_contact=False,

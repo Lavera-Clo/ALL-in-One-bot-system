@@ -145,7 +145,8 @@ async def test_reply_pipeline():
         system = seen[0][1][0]["content"]
         check("THIS CUSTOMER AND THIS CONVERSATION" in system and "guests: 120" in system and "Nimal" in system,
               "the system prompt carries who they are and what they told us")
-        check("CONTINUING THE CONVERSATION LIKE A PERSON" in system and "Never ask for something they already told you" in system,
+        check("HOW TO REPLY" in system and "Never ask for something they already told you" in system
+              and "Pick up where you left off" in system,
               "and the rules for continuing a chat like a person")
         check(len(seen[0][1]) == 1 + 16 + 1, "the model reads the last 16 messages (was 10)")
         check(len(seen) == 1 and "120 guests" in reply.text,

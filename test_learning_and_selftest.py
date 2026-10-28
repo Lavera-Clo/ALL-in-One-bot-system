@@ -265,7 +265,7 @@ async def test_api():
     async with httpx.AsyncClient(transport=transport, base_url="http://test",
                                  headers={"Authorization": f"Bearer {token}"}) as client:
         industries = (await client.get("/api/industries")).json()
-        check(len(industries) == 12 and industries[0]["key"] == "hospitality", "the industry list is available to the form")
+        check(len(industries) == 14 and industries[0]["key"] == "hospitality", "the industry list is available to the form")
 
         res = await client.post("/api/tenants", json={
             "business_name": "City Care", "industry": "clinic", "whatsapp_phone_number_id": "test-123",
