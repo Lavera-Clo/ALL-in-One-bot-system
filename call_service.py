@@ -321,9 +321,30 @@ _sessions: Dict[str, "CallSession"] = {}
 _agent_legs: Dict[int, "CallSession"] = {}      # call row id -> the website leg joined to it
 
 
+def ice_servers() -> List[dict]:
+    """STUN, and TURN when configured: shared by this server's call legs and the team's browsers."""
+    servers = [{"urls": settings.CALL_STUN_SERVER}] if settings.CALL_STUN_SERVER else []
+    if settings.CALL_TURN_URL:
+        servers.append({"urls": settings.CALL_TURN_URL, "username": settings.CALL_TURN_USERNAME,
+                        "credential": settings.CALL_TURN_PASSWORD})
+    return servers
+
+
 def _rtc() -> RTCPeerConnection:
-    servers = [RTCIceServer(urls=settings.CALL_STUN_SERVER)] if settings.CALL_STUN_SERVER else []
+    servers = [RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential"))
+               for s in ice_servers()]
     return RTCPeerConnection(RTCConfiguration(iceServers=servers))
+
+
+def candidates(sdp: str) -> str:
+    """The network addresses an SDP offers, for the log: "host 172.31.5.6:50122, srflx 3.1.2.3:50122"."""
+    found = []
+    for line in (sdp or "").splitlines():
+        if line.startswith("a=candidate:"):
+            parts = line.split()
+            if len(parts) >= 8:
+                found.append(f"{parts[7]} {parts[4]}:{parts[5]}/{parts[2].lower()}")
+    return ", ".join(found) or "none"
 
 
 class CallSession:
@@ -365,6 +386,8 @@ class CallSession:
         self.taken_by: Optional[str] = None
         self.pending_agent: Optional["CallSession"] = None
         self.ring_decided = asyncio.Event()     # incoming: the team answered, or let the AI take it
+        self.label = f"{call_row_id}/{role}"    # in every log line about this leg
+        self._monitoring = False
         self.speech_turn = 0                    # +1 when the caller talks over the bot: stop the rest
         self.fillers_used = 0
         self._filler: Optional[asyncio.Future] = None
@@ -392,10 +415,42 @@ class CallSession:
                                          on_audio=self._record_in if self.capture else None)
                 self.tasks.append(asyncio.ensure_future(self.listener.run()))
 
+        @self.pc.on("iceconnectionstatechange")
+        async def _on_ice():
+            logger.info(f"[call] {self.label}: ICE {self.pc.iceConnectionState}")
+
         @self.pc.on("connectionstatechange")
         async def _on_state():
+            logger.info(f"[call] {self.label}: connection {self.pc.connectionState}")
+            if self.pc.connectionState == "connected" and not self._monitoring:
+                self._monitoring = True
+                self.tasks.append(asyncio.ensure_future(self._monitor()))
             if self.pc.connectionState in ("failed", "closed"):
                 await self.finish("failed" if self.pc.connectionState == "failed" and not self.answered.is_set() else None)
+
+    # --- diagnostics -----------------------------------------------------------
+
+    def log_sdp(self, what: str, sdp: str) -> None:
+        logger.info(f"[call] {self.label}: {what} candidates: {candidates(sdp)}")
+
+    async def _monitor(self) -> None:
+        """
+        Every few seconds (more often at the start): is audio arriving from this side, and going out to
+        it? "heard 0" means nothing reaches the server from them - a network/firewall problem, not the bot.
+        """
+        last = (0, 0, 0, 0)
+        for i in range(400):
+            await asyncio.sleep(5 if i < 12 else 30)
+            if self.ended.is_set():
+                return
+            heard = self.listener.frames if self.listener else -1
+            loud = self.listener.loud_frames if self.listener else -1
+            now = (heard, loud, self.speaker.sent_frames, self.speaker.forwarded_frames)
+            partner = f", with {self.partner.label} ({self.partner.pc.connectionState})" if self.partner else ""
+            logger.info(f"[call] {self.label}: audio in {now[0] - last[0] if heard >= 0 else 'n/a'} frames "
+                        f"({now[1] - last[1] if loud >= 0 else 'n/a'} with sound), out {now[2] - last[2]}, "
+                        f"passed on from the other side {now[3] - last[3]}{partner}")
+            last = now
 
     # --- recording -----------------------------------------------------------
 
@@ -888,6 +943,7 @@ async def dial(tenant: Tenant, phone: str, role: str = "customer", purpose: str 
     session.waiting_for = for_session
     offer = await session.pc.createOffer()
     await session.pc.setLocalDescription(offer)        # aiortc gathers ICE candidates here
+    session.log_sdp("this server offers", session.pc.localDescription.sdp)
     try:
         res = await calls_api(tenant, {"to": digits(phone), "action": "connect",
                                        "session": {"sdp_type": "offer", "sdp": session.pc.localDescription.sdp},
@@ -949,6 +1005,7 @@ async def handle_call_events(tenant: Tenant, value: dict) -> None:
                 session = _sessions.get(call_id)
                 sdp = (event.get("session") or {}).get("sdp")
                 if session and sdp:
+                    session.log_sdp("WhatsApp answers with", sdp)
                     await session.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
             elif kind == "terminate":
                 session = _sessions.get(call_id)
@@ -1029,10 +1086,12 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
     async with AsyncSessionLocal() as db:
         session.ai_allowed = bot_may_reply(tenant, await get_conversation(db, tenant.id, phone))
     try:
+        session.log_sdp("WhatsApp offers", offer)
         await session.pc.setRemoteDescription(RTCSessionDescription(sdp=offer, type="offer"))
         answer = await session.pc.createAnswer()
         await session.pc.setLocalDescription(answer)
         sdp = session.pc.localDescription.sdp
+        session.log_sdp("this server answers with", sdp)
         await calls_api(tenant, {"call_id": call_id, "action": "pre_accept", "session": {"sdp_type": "answer", "sdp": sdp}})
         # The team's websites ring first; whoever presses Answer takes it. Nobody within
         # CALL_TEAM_RING_SECONDS (or "Let the AI answer") -> the AI picks up.
@@ -1112,8 +1171,10 @@ def _customer_session(call_row_id: int) -> Optional[CallSession]:
 async def _browser_leg(tenant: Tenant, phone: str, call_row_id: int, offer_sdp: str) -> CallSession:
     leg = CallSession(tenant, phone, "browser", call_row_id, role="agent")
     try:
+        leg.log_sdp("the team's browser offers", offer_sdp)
         await leg.pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
         await leg.pc.setLocalDescription(await leg.pc.createAnswer())
+        leg.log_sdp("this server answers the browser with", leg.pc.localDescription.sdp)
     except Exception as exc:
         await leg.finish()
         raise ValueError(f"The browser's audio offer wasn't usable: {exc}")

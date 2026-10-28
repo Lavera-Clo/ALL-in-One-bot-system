@@ -1959,6 +1959,13 @@ async def start_call_api(tenant_id: int, payload: CallStart,
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/tenants/{tenant_id}/calls/ice-servers", tags=["Calls"])
+async def call_ice_servers(tenant_id: int, db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """The STUN/TURN servers the website's call audio should use (the same as this server's)."""
+    await _get_tenant_or_404(db, tenant_id, admin)
+    return {"iceServers": call_service.ice_servers()}
+
+
 @app.post("/api/tenants/{tenant_id}/calls/team-dial", tags=["Calls"])
 async def team_dial_api(tenant_id: int, payload: TeamDial,
                         db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):

@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     CALLS_ENABLED: bool = os.getenv("CALLS_ENABLED", "true").strip().lower() not in ("0", "false", "no")
     CALLS_GRAPH_API_VERSION: str = os.getenv("CALLS_GRAPH_API_VERSION", "v23.0")
     CALL_STUN_SERVER: str = os.getenv("CALL_STUN_SERVER", "stun:stun.l.google.com:19302")
+    # A TURN relay for call audio, when a direct path can't be made (the team's browser behind a
+    # carrier's NAT, a strict firewall). e.g. turn:bot.example.com:3478 with coturn on the server.
+    CALL_TURN_URL: str = os.getenv("CALL_TURN_URL", "")
+    CALL_TURN_USERNAME: str = os.getenv("CALL_TURN_USERNAME", "")
+    CALL_TURN_PASSWORD: str = os.getenv("CALL_TURN_PASSWORD", "")
     CALL_MAX_MINUTES: int = int(os.getenv("CALL_MAX_MINUTES", "15"))
     # Incoming calls ring the team's website first for this long; then the AI answers (0 = AI at once).
     CALL_TEAM_RING_SECONDS: int = int(os.getenv("CALL_TEAM_RING_SECONDS", "15"))

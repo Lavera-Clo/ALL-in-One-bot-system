@@ -41,6 +41,9 @@ class SpeakerTrack(MediaStreamTrack):
         self._start: Optional[float] = None
         self.forward: Optional[MediaStreamTrack] = None   # set when bridged to another call
         self.tap: Optional[Callable[[bytes], None]] = None  # sees every 20 ms sent (call recording)
+        # Diagnostics (call_service logs them): frames sent, and frames that came from the other leg.
+        self.sent_frames = 0
+        self.forwarded_frames = 0
         self._from_forward = ToMono(RATE)
 
     def say(self, pcm: bytes) -> None:
@@ -69,6 +72,7 @@ class SpeakerTrack(MediaStreamTrack):
             try:
                 other = await asyncio.wait_for(self.forward.recv(), timeout=0.1)
                 pcm = self._from_forward(other)
+                self.forwarded_frames += 1
             except (asyncio.TimeoutError, MediaStreamError):
                 pcm = None
         if pcm is None:
@@ -77,6 +81,7 @@ class SpeakerTrack(MediaStreamTrack):
             del self._buffer[:need]
             pcm = chunk + b"\x00" * (need - len(chunk))
         samples = len(pcm) // 2
+        self.sent_frames += 1
         if self.tap is not None:
             self.tap(pcm)
         frame = av.AudioFrame.from_ndarray(np.frombuffer(pcm, dtype=np.int16).reshape(1, -1), format="s16", layout="mono")
@@ -137,6 +142,8 @@ class Listener:
         self.on_utterance = on_utterance
         self.on_barge_in = on_barge_in
         self.paused = False        # while bridged to a person the AI stops listening
+        self.frames = 0            # frames received from the caller (diagnostics)
+        self.loud_frames = 0       # ...of which had sound in them
         self._noise = 300.0
 
     def _threshold(self) -> float:
@@ -152,6 +159,9 @@ class Listener:
             except MediaStreamError:
                 return
             pcm = self._to_listen(frame)
+            self.frames += 1
+            if loudness(pcm) > 300:
+                self.loud_frames += 1
             if self.on_audio is not None:
                 self.on_audio(pcm)
             if self.paused:
