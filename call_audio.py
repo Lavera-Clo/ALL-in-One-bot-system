@@ -29,6 +29,28 @@ FRAME = 960                # 20 ms at 48 kHz
 LISTEN_RATE = 16_000       # what speech-to-text wants
 FRAME_SECONDS = FRAME / RATE
 
+# A call is live: sound that arrives late is worth less than sound now. When frames pile up (the
+# server briefly couldn't keep up, a burst after a network hiccup), the oldest are dropped instead of
+# played late - otherwise the delay grows for the rest of the call and never comes back.
+MAX_FORWARD_BACKLOG = 3        # frames (60 ms) waiting from the other side before old ones are dropped
+MAX_LISTEN_BACKLOG = 25        # frames (0.5 s) of the caller waiting to be heard by the AI
+
+
+def drop_backlog(track, keep: int) -> int:
+    """Drop all but the newest `keep` frames queued on a relayed track. Returns how many were dropped."""
+    queue = getattr(track, "_queue", None)
+    dropped = 0
+    while queue is not None and queue.qsize() > keep:
+        try:
+            frame = queue.get_nowait()
+        except Exception:  # noqa: BLE001
+            break
+        if frame is None:                       # end of stream: keep it for recv() to see
+            queue.put_nowait(None)
+            break
+        dropped += 1
+    return dropped
+
 
 class SpeakerTrack(MediaStreamTrack):
     """Outgoing audio. Plays queued PCM in real time; silence when there's nothing to say."""
@@ -44,6 +66,7 @@ class SpeakerTrack(MediaStreamTrack):
         # Diagnostics (call_service logs them): frames sent, and frames that came from the other leg.
         self.sent_frames = 0
         self.forwarded_frames = 0
+        self.dropped_frames = 0    # late frames from the other side, dropped to keep the delay low
         self._from_forward = ToMono(RATE)
 
     def say(self, pcm: bytes) -> None:
@@ -69,8 +92,10 @@ class SpeakerTrack(MediaStreamTrack):
 
         pcm = None
         if self.forward is not None and not self._buffer:
+            self.dropped_frames += drop_backlog(self.forward, MAX_FORWARD_BACKLOG)
             try:
-                other = await asyncio.wait_for(self.forward.recv(), timeout=0.1)
+                # A short wait: if their next frame isn't here yet, a moment of silence beats a delay.
+                other = await asyncio.wait_for(self.forward.recv(), timeout=0.03)
                 pcm = self._from_forward(other)
                 self.forwarded_frames += 1
             except (asyncio.TimeoutError, MediaStreamError):
@@ -143,6 +168,7 @@ class Listener:
         self.on_barge_in = on_barge_in
         self.paused = False        # while bridged to a person the AI stops listening
         self.frames = 0            # frames received from the caller (diagnostics)
+        self.dropped = 0           # frames dropped because the server fell behind
         self.loud_frames = 0       # ...of which had sound in them
         self._noise = 300.0
 
@@ -154,6 +180,7 @@ class Listener:
         loud_frames = quiet_time = speech_time = 0.0
         in_speech = False
         while True:
+            self.dropped += drop_backlog(self.track, MAX_LISTEN_BACKLOG)
             try:
                 frame = await self.track.recv()
             except MediaStreamError:

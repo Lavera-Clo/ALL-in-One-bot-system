@@ -448,18 +448,21 @@ class CallSession:
         Every few seconds (more often at the start): is audio arriving from this side, and going out to
         it? "heard 0" means nothing reaches the server from them - a network/firewall problem, not the bot.
         """
-        last = (0, 0, 0, 0)
+        last = (0, 0, 0, 0, 0)
         for i in range(400):
             await asyncio.sleep(5 if i < 12 else 30)
             if self.ended.is_set():
                 return
             heard = self.listener.frames if self.listener else -1
             loud = self.listener.loud_frames if self.listener else -1
-            now = (heard, loud, self.speaker.sent_frames, self.speaker.forwarded_frames)
+            dropped = self.speaker.dropped_frames + (self.listener.dropped if self.listener else 0)
+            now = (heard, loud, self.speaker.sent_frames, self.speaker.forwarded_frames, dropped)
             partner = f", with {self.partner.label} ({self.partner.pc.connectionState})" if self.partner else ""
             logger.info(f"[call] {self.label}: audio in {now[0] - last[0] if heard >= 0 else 'n/a'} frames "
                         f"({now[1] - last[1] if loud >= 0 else 'n/a'} with sound), out {now[2] - last[2]}, "
-                        f"passed on from the other side {now[3] - last[3]}{partner}")
+                        f"passed on from the other side {now[3] - last[3]}{partner}"
+                        + (f"; DROPPED {now[4] - last[4]} late frames (the server is falling behind - "
+                           f"a bigger server fixes it)" if now[4] - last[4] else ""))
             last = now
 
     # --- recording -----------------------------------------------------------

@@ -1009,6 +1009,59 @@ async def test_claim(tenant):
     settings.CALL_TEAM_RING_SECONDS = 0
 
 
+async def lag(listener, speaker, hz, limit=6.0):
+    """Seconds from `speaker` starting a tone to `listener` hearing it (20 ms steps)."""
+    await asyncio.sleep(1.0)                       # quiet first
+    speaker.talk(hz, 1.0)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < limit:
+        if abs(listener.recent_hz(0.08) - hz) < 60:
+            return time.monotonic() - t0
+        await asyncio.sleep(0.02)
+    return limit
+
+
+async def test_latency(tenant):
+    print("\nVoice delay between the customer and a team member")
+    import realtime
+    realtime.call_desks.active[tenant.id] = [object()]
+    settings.CALL_TEAM_RING_SECONDS = 5
+    phone, task = await ringing_call(tenant, "wacid.lag.1")
+    row = await row_for("wacid.lag.1")
+    await cs.claim_call(tenant, row.id, "Kasun")
+    browser = await browser_offer()
+    answer = await cs.team_answer(tenant, row.id, browser.pc.localDescription.sdp, "Kasun")
+    await browser.pc.setRemoteDescription(RTCSessionDescription(answer, "answer"))
+    await connect_caller(phone, task)
+    await asyncio.sleep(1.5)
+    first = [await lag(phone, browser, MANAGER_HZ), await lag(browser, phone, CUSTOMER_HZ)]
+    # Both talk for a while (a real conversation), then measure again: a delay must not build up.
+    for _ in range(4):
+        browser.talk(MANAGER_HZ, 2.0)
+        phone.talk(CUSTOMER_HZ, 2.0)
+        await asyncio.sleep(2.5)
+    await asyncio.sleep(2.0)
+    later = [await lag(phone, browser, MANAGER_HZ), await lag(browser, phone, CUSTOMER_HZ)]
+    print(f"  (team -> customer {first[0]:.2f}s, customer -> team {first[1]:.2f}s; after talking: "
+          f"{later[0]:.2f}s / {later[1]:.2f}s)")
+    check(max(first) < 0.6, f"the voice arrives in under 0.6 s ({max(first):.2f}s)")
+    check(max(later) < 0.6, f"and no delay builds up during the call ({max(later):.2f}s)")
+    # The server freezes for 2 s mid-call (a small, busy machine): the sound that piled up must be
+    # dropped, not played 2 s late for the rest of the call.
+    browser.talk(MANAGER_HZ, 4.0)
+    phone.talk(CUSTOMER_HZ, 4.0)
+    await asyncio.sleep(0.5)
+    time.sleep(2.0)                                # blocks everything, like an overloaded CPU
+    await asyncio.sleep(4.0)
+    after_stall = [await lag(phone, browser, MANAGER_HZ), await lag(browser, phone, CUSTOMER_HZ)]
+    print(f"  (after the server froze for 2 s: {after_stall[0]:.2f}s / {after_stall[1]:.2f}s)")
+    check(max(after_stall) < 0.6, f"after the server froze for 2 s the delay comes back down ({max(after_stall):.2f}s)")
+    await cs._sessions["wacid.lag.1"].hang_up()
+    await phone.close()
+    await browser.close()
+    settings.CALL_TEAM_RING_SECONDS = 0
+
+
 async def test_portal(tenant):
     print("\nPortal")
     async with AsyncSessionLocal() as db:
@@ -1067,6 +1120,7 @@ async def main_async():
     await test_learning(t)
     await test_speed(t)
     await test_claim(t)
+    await test_latency(t)
     await test_portal(t)
     for s in list(cs._sessions.values()):
         await s.finish()
