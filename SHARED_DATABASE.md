@@ -45,21 +45,12 @@ The Android app keeps its own copy of everything it has already received.
 1. **Create the database.** A Supabase project is the easiest. Copy *Project Settings → Database →
    Connection string → URI*. Use the session pooler (port 5432).
 2. **Install the drivers** on the server: `pip install -r requirements.txt` (adds `asyncpg`).
-3. **Copy the current data.** Stop the server first, then:
-   ```bash
-   python migrate_to_postgres.py --from sqlite+aiosqlite:///./whatsapp_bot.db --to "postgresql://...your URI..."
-   ```
-   The script only reads the SQLite file and refuses a target database that already has data.
+3. **Copy the current data.** The one-time copy tools (`migrate_to_postgres.py`, `import_supabase_messages.py`)
+   were removed in the October 2026 clean-up, as the server already runs on its database. To move databases
+   again, restore them from git history: `git checkout cc546df -- migrate_to_postgres.py import_supabase_messages.py`.
 4. **Point the server at it:** set `DATABASE_URL=postgresql://...` in `.env`, then start the server.
    Owners sign in with their same passwords.
-5. **Bring over the Business Sender website's old messages** (its Supabase `messages` table), if it had any:
-   ```bash
-   set SUPABASE_URL=https://xxxx.supabase.co
-   set SUPABASE_SERVICE_ROLE_KEY=...
-   python import_supabase_messages.py --days 21
-   ```
-   Each WhatsApp number needs a business on the server first. Numbers that don't have one are listed and skipped,
-   and running the import again is safe.
+5. (Removed: importing the website's old Supabase messages - also restorable from git history.)
 6. **Switch Meta's webhook** to this server: Meta Developer Dashboard → WhatsApp → Configuration →
    Callback URL `https://YOUR-SERVER/webhook`, with your `META_VERIFY_TOKEN`. Subscribe to
    `messages`. Delivery and read receipts arrive on the same subscription.
@@ -72,7 +63,6 @@ The Android app keeps its own copy of everything it has already received.
 ```bash
 python test_sync_and_retention.py          # SQLite
 python run_tests_postgres.py               # every suite on a real PostgreSQL (pip install pgserver asyncpg)
-python test_migrate_to_postgres.py         # the SQLite → PostgreSQL copy
 ```
 Android: `./gradlew testDebugUnitTest` (CloudSyncTest). `CloudApiLiveTest` runs against a test
 server when `CLOUD_E2E_URL`, `CLOUD_E2E_EMAIL` and `CLOUD_E2E_PASSWORD` are set.

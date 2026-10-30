@@ -372,7 +372,8 @@ class CallSession:
         self.wa_call_id: Optional[str] = None
         self.pc = _rtc()
         self.relay = MediaRelay()
-        self.speaker = SpeakerTrack()
+        # WhatsApp legs send nothing until the call is answered; the website's own leg is live at once.
+        self.speaker = SpeakerTrack(live=role == "agent")
         self.pc.addTrack(self.speaker)
         self.remote = None                 # the caller's audio
         self.listener: Optional[Listener] = None
@@ -735,6 +736,7 @@ class CallSession:
 
     async def started(self) -> None:
         """They picked up (or we picked up): say the first line, start the clock."""
+        self.speaker.open()
         self.answered.set()
         greeting = None
         if (self.role == "customer" and self.direction == "incoming" and not self.taken_by
@@ -1052,6 +1054,8 @@ async def handle_call_statuses(tenant: Tenant, statuses: list) -> None:
             continue
         state = (status.get("status") or "").upper()
         if state == "ACCEPTED" and not session.answered.is_set():
+            session.speaker.open()          # they picked up: audio starts now, not while it rang
+            logger.info(f"[call] {session.label}: answered; sending audio")
             if session.role == "manager":
                 session.answered.set()
             else:
@@ -1152,6 +1156,7 @@ async def _incoming(tenant: Tenant, event: dict, name: Optional[str]) -> None:
                 return
         await calls_api(tenant, {"call_id": call_id, "action": "accept", "session": {"sdp_type": "answer", "sdp": sdp},
                                  "biz_opaque_callback_data": f"call:{row_id}"})
+        session.speaker.open()              # accepted: now the caller can hear us
     except Exception:
         logger.exception("[call] could not answer")
         await session.finish("failed")

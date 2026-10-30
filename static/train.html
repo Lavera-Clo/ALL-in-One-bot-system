@@ -180,7 +180,6 @@
         <a href="/admin">Admin</a>
         <a href="/orders">Orders</a>
         <a href="/train" class="active">Train Bot</a>
-        <a href="/business-ideas">Ideas</a>
         <a href="/docs">API Docs</a>
         <a href="#" id="logoutLink" style="display:none">Log out</a>
     </div>
@@ -375,6 +374,11 @@
                 <label>Greeting buttons (up to 2, one per line, 20 characters each)</label>
                 <p class="hint">The buttons sent when a customer says hello. Leave it empty to use the ones for your industry, shown here in grey. A contact button is always added as the third.</p>
                 <textarea class="form-control" id="p_quick_buttons" style="min-height:4.5rem"></textarea>
+            </div>
+            <div class="field">
+                <label>WhatsApp Business Account ID (for template messages)</label>
+                <p class="hint">Filled in by itself from the first message a customer sends. Only type it if template messages say it's missing: WhatsApp Manager &rarr; Account tools &rarr; Phone numbers, the number under the account name.</p>
+                <input class="form-control" id="p_wa_business_account_id" inputmode="numeric" placeholder="e.g. 123456789012345">
             </div>
             <button class="btn btn-primary" id="saveProfileBtn"><i class="fa-solid fa-floppy-disk"></i> Save profile</button>
         </div>
@@ -899,7 +903,8 @@ async function loadProviders() {
 
 // ---------- profile ----------
 const PROFILE_FIELDS = ['business_name', 'bot_name', 'bot_role_title', 'business_location', 'currency',
-    'industry', 'human_handoff_number', 'front_office_number', 'handoff_rules', 'quick_menu', 'quick_buttons'];
+    'industry', 'human_handoff_number', 'front_office_number', 'handoff_rules', 'quick_menu', 'quick_buttons',
+    'wa_business_account_id'];
 
 let industries = [];          // [{key, label, role_title, handoff_rules, quick_buttons}]
 let shownIndustry = '';       // the industry whose defaults are currently on screen

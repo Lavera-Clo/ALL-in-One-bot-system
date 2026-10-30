@@ -55,6 +55,8 @@ def _summary(kind: str, a: dict) -> str:
         return f"[Location] {place}\n{maps}".replace("] \n", "]\n")
     if kind == "contacts":
         return "[Contact] " + ", ".join(f"{c.get('name')} {c.get('phone')}" for c in a.get("contacts") or [])
+    if kind == "template":
+        return f"[Template: {a.get('template_name')}]\n{a.get('shown_text') or ''}".strip()
     if kind == "catalog":
         return f"{a.get('body_text') or ''}\n[View catalogue]".strip()
     if kind == "products":
@@ -675,3 +677,18 @@ async def send_whatsapp_products(phone_number_id: str, recipient_phone: str, cat
         logger.info(f"[MOCK WHATSAPP SENDER] products to {recipient_phone}: {retailer_ids}")
         return {"status": "mock_sent"}
     return await _post_message(phone_number_id, meta_access_token, {"to": recipient_phone, "type": "interactive", "interactive": interactive})
+
+
+@_reported("template")
+async def send_whatsapp_template(phone_number_id: str, recipient_phone: str, template_name: str, language: str,
+                                 components: list, meta_access_token: str, shown_text: str = "") -> dict:
+    """An approved template (template_service.py): the only kind of message allowed after 24 hours.
+    `shown_text` is what the customer reads, for the inbox."""
+    template = {"name": template_name, "language": {"code": language}}
+    if components:
+        template["components"] = components
+    if _mock_token(meta_access_token):
+        logger.info(f"[MOCK WHATSAPP SENDER] template {template_name} to {recipient_phone}: {components}")
+        return {"status": "mock_sent", "messages": [{"id": f"wamid.mock.template.{template_name}"}]}
+    return await _post_message(phone_number_id, meta_access_token,
+                               {"to": recipient_phone, "type": "template", "template": template})

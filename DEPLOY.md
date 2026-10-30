@@ -27,7 +27,7 @@ background jobs like history cleanup and cart reminders, file uploads).
 2. Project Settings → Database → **Connection string → URI**, *Session pooler* (port 5432).
    It looks like `postgresql://postgres.abcd:PASSWORD@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`.
 3. Tables are created by the server on first start. To bring your current data along, run
-   `migrate_to_postgres.py` once (see SHARED_DATABASE.md). This works from your own PC.
+   the data across once (see SHARED_DATABASE.md; the one-time copy tools were removed in the October 2026 clean-up - restore them from git history if needed). This works from your own PC.
 
 Free projects can pause after a week with no activity; the server's regular work normally keeps
 it active. Check the Supabase dashboard if the bot ever stops answering.

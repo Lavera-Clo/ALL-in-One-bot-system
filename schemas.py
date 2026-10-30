@@ -292,8 +292,19 @@ class BotProfileUpdate(BaseModel):
     handoff_rules: Optional[str] = Field(None, example="Discounts and negotiation\nComplaints and refunds")
     quick_menu: Optional[str] = Field(None, example="Grand Ballroom | 150-650 guests\nGarden Lawn | Outdoor lake view")
     quick_buttons: Optional[str] = Field(None, example="📊 View Prices\n🍽️ View Menus")
+    # Where the approved templates live (WhatsApp Manager -> Account tools). Normally picked up by itself.
+    wa_business_account_id: Optional[str] = Field(None, max_length=64, pattern=r"^\d*$", example="123456789012345")
 
     _check_industry = field_validator("industry")(_industry_key)
+
+
+class TemplateSend(BaseModel):
+    """Send an approved template: its name and language, and what goes in each blank."""
+    name: str = Field(..., min_length=1, max_length=512)
+    language: str = Field(..., min_length=2, max_length=15, example="en_US")
+    body: Dict[str, str] = Field(default_factory=dict, example={"1": "Nimal", "2": "ORD-12"})
+    header: Dict[str, str] = Field(default_factory=dict)
+    client_msg_id: Optional[str] = Field(None, max_length=64)
 
 
 class WebsiteTrain(BaseModel):

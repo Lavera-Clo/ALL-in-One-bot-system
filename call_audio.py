@@ -56,8 +56,14 @@ class SpeakerTrack(MediaStreamTrack):
     """Outgoing audio. Plays queued PCM in real time; silence when there's nothing to say."""
     kind = "audio"
 
-    def __init__(self):
+    def __init__(self, live: bool = True):
         super().__init__()
+        # Nothing is sent until the call is answered (open()). Audio sent to WhatsApp while the
+        # phone is still ringing is held and played once they pick up - so everything said after it
+        # arrived seconds late for the whole call (measured live: ~3 s, team -> customer only).
+        self.live = asyncio.Event()
+        if live:
+            self.live.set()
         self._buffer = bytearray()          # s16le mono 48 kHz
         self._pts = 0
         self._start: Optional[float] = None
@@ -82,9 +88,20 @@ class SpeakerTrack(MediaStreamTrack):
     def seconds_queued(self) -> float:
         return len(self._buffer) / 2 / RATE
 
+    def open(self) -> None:
+        """The call was answered: start sending, from now (no backlog)."""
+        if not self.live.is_set():
+            if self.forward is not None:
+                drop_backlog(self.forward, 0)
+            self._start = None
+            self.live.set()
+
     async def recv(self) -> av.AudioFrame:
+        if not self.live.is_set():
+            await self.live.wait()
         if self._start is None:
-            self._start = time.monotonic()
+            # The clock starts now; the frame count carries on, so timestamps never go backwards.
+            self._start = time.monotonic() - self._pts / RATE
         # Pace frames to the clock: WebRTC expects one 20 ms frame every 20 ms.
         wait = self._start + self._pts / RATE - time.monotonic()
         if wait > 0:

@@ -233,42 +233,6 @@ async def test_all():
         check(all(m["text"] != "Hi, do you have Ceylon tea?" for m in other["messages"]), "and syncs only its own messages")
 
 
-async def test_supabase_import():
-    """The website's old Supabase messages come into the common database (import_supabase_messages.py)."""
-    print("\nImporting the website's old Supabase messages")
-    from import_supabase_messages import import_messages
-    now = datetime.now(timezone.utc)
-    fake_messages = [
-        {"business_phone_id": "7777", "phone_number": "94765550123", "direction": "incoming", "message_text": "I paid by bank transfer",
-         "message_type": "text", "wa_message_id": "sb-1", "created_at": (now - timedelta(days=2)).isoformat()},
-        {"business_phone_id": "7777", "phone_number": "94765550123", "direction": "incoming", "message_text": "[Image] slip",
-         "message_type": "image", "wa_message_id": "sb-2", "created_at": (now - timedelta(days=2, minutes=-1)).isoformat()},
-        {"business_phone_id": "7777", "phone_number": NIMAL, "direction": "incoming", "message_text": "already here",
-         "message_type": "text", "wa_message_id": "m1", "created_at": now.isoformat()},
-        {"business_phone_id": "5555", "phone_number": "94700000009", "direction": "incoming", "message_text": "someone else's",
-         "message_type": "text", "wa_message_id": "sb-3", "created_at": now.isoformat()},
-    ]
-    seen_params = []
-
-    def handler(request: httpx.Request):
-        assert request.headers["apikey"] == "service-key"
-        seen_params.append(dict(request.url.params))
-        if request.url.path.endswith("/messages"):
-            return httpx.Response(200, json=fake_messages if request.url.params.get("offset") == "0" else [])
-        return httpx.Response(200, json=[{"phone_number": "94765550123", "name": "Kasun Silva"}, {"phone_number": NIMAL, "name": "Unknown"}])
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as fake:
-        report = await import_messages("https://x.supabase.co", "service-key", 21, client=fake, quiet=True)
-        check(report["imported"] == 2 and report["already_here"] == 1 and report["no_business"] == {"5555": 1},
-              "new messages imported, ones already here skipped, unknown numbers reported")
-        check(seen_params[0]["created_at"].startswith("gte."), "only the kept history period is fetched")
-        async with AsyncSessionLocal() as db:
-            conv = (await db.execute(select(Conversation).where(Conversation.customer_phone == "94765550123"))).scalar_one()
-        check(conv.customer_name == "Kasun Silva" and conv.message_count == 2, "the customer becomes a contact with their name")
-        again = await import_messages("https://x.supabase.co", "service-key", 21, client=fake, quiet=True)
-        check(again["imported"] == 0 and again["already_here"] == 3, "running the import twice adds nothing")
-
-
 async def test_upgrade_existing_database():
     """A database from before this change: new columns are added and filled in on startup."""
     print("\nUpgrading an existing database")
@@ -294,7 +258,6 @@ async def test_upgrade_existing_database():
 async def main_async():
     await init_db()
     await test_all()
-    await test_supabase_import()
     await test_upgrade_existing_database()
     await engine.dispose()
 

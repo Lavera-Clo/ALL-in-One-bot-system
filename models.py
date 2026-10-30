@@ -53,6 +53,9 @@ class Tenant(Base):
     # WhatsApp catalogue (catalog_service.py): the Meta Commerce catalogue linked to this number.
     # Products are synced to it, so customers can browse and send a cart from WhatsApp itself.
     wa_catalog_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The WhatsApp Business Account the number belongs to: where its approved templates live
+    # (template_service.py). Picked up from Meta's webhooks by itself.
+    wa_business_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     catalog_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     catalog_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -32,7 +32,6 @@ import shutil
 import secrets
 import string
 
-from business_idea_service import generate_business_ideas, create_pdf_from_text
 
 from config import settings
 from database import init_db, get_db, AsyncSessionLocal
@@ -68,6 +67,7 @@ from schemas import (
     SignupRequest,
     WhatsAppConnectRequest,
     InboxSendRequest, DeviceMessageRecord, ContactUpdate, HistorySettings, BookingUpdate, CallStart, InboxShare, CatalogConnect, BrowserCallOffer, TeamDial, WebsiteTrain,
+    TemplateSend,
     ChatBotUpdate,
     BusinessBotUpdate,
     ManualOrderCreate,
@@ -102,6 +102,7 @@ from whatsapp_client import (
     send_whatsapp_location,
     send_whatsapp_contacts,
     send_whatsapp_products,
+    send_whatsapp_template,
     upload_whatsapp_media,
 )
 from order_service import (
@@ -408,7 +409,6 @@ app.add_middleware(RateLimitMiddleware, limits={
     "/api/upload/product-image": (10, 60),    # image uploads
     "/api/admin/login": (10, 60),             # brute-force protection
     "/api/signup": (5, 600),                  # each sign-up creates a business
-    "/api/generate-business-ideas": (5, 300), # each run costs an OpenAI call
     "/api/auth/forgot-password": (5, 300),    # anti-spam password reset requests
     "/api/superadmin/accounts": (30, 60),     # account management operations
 })
@@ -1270,7 +1270,6 @@ async def root(request: Request):
             "status": "online",
             "service": "Multi-Tenant WhatsApp AI Chatbot Backend",
             "admin_portal": "/admin",
-            "business_ideas": "/business-ideas",
             "docs": "/docs"
         }
     page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "home.html")
@@ -1296,6 +1295,7 @@ from document_service import (
 import llm_router
 import call_service
 import training_sources
+import template_service
 from prompts.persona_system_prompt import AVAILABLE_TEMPLATES
 from tenant_config import build_bot_config, parse_quick_menu
 from industry_brain import CONTACT_BUTTON_ID, INDUSTRY_CHOICES, button_phrase, get_pack
@@ -1370,6 +1370,7 @@ async def get_bot_profile(
         "handoff_rules": config.handoff_rules,
         "quick_menu": tenant.quick_menu or "",
         "quick_buttons": tenant.quick_buttons or "",
+        "wa_business_account_id": tenant.wa_business_account_id or "",
         "available_templates": AVAILABLE_TEMPLATES,
         # What each industry gives a business that has not typed its own, so the portal can
         # show them and swap them when the industry is changed.
@@ -2076,6 +2077,42 @@ async def inbox_send_media(tenant_id: int, phone: str, file: UploadFile = File(.
                                      client_msg_id=client_msg_id)
 
 
+@app.get("/api/tenants/{tenant_id}/templates", tags=["Inbox"])
+async def list_templates_api(tenant_id: int, refresh: bool = False,
+                             db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """This business's approved WhatsApp templates (from Meta), for messaging customers after 24 hours."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    try:
+        return {"templates": await template_service.list_templates(tenant, refresh=refresh)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/template", tags=["Inbox"])
+async def inbox_send_template(tenant_id: int, phone: str, payload: TemplateSend,
+                              db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    """Send an approved template - works however long ago the customer last wrote."""
+    tenant = await _get_tenant_or_404(db, tenant_id, admin)
+    phone = _chat_phone(phone)
+    earlier = await find_by_client_id(db, tenant.id, payload.client_msg_id)
+    if earlier is not None:
+        return {"message_id": earlier.id, "ok": earlier.status != "FAILED", "error": earlier.error}
+    try:
+        templates = await template_service.list_templates(tenant)
+        template = next((t for t in templates if t["name"] == payload.name and t["language"] == payload.language), None)
+        if template is None:
+            raise ValueError("That template isn't approved for this number (or its name/language changed).")
+        components, shown = template_service.build(template, payload.body, payload.header)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    async def send():
+        await send_whatsapp_template(tenant.whatsapp_phone_number_id, phone, payload.name, payload.language,
+                                     components, tenant.meta_access_token, shown_text=shown)
+
+    return await send_other_as_agent(tenant, phone, send, client_msg_id=payload.client_msg_id)
+
+
 @app.post("/api/tenants/{tenant_id}/inbox/chats/{phone}/share", tags=["Inbox"])
 async def inbox_share(tenant_id: int, phone: str, payload: InboxShare,
                       db: AsyncSession = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
@@ -2696,6 +2733,12 @@ async def _handle_webhook_body(body: dict, db: AsyncSession):
             value = change.get("value", {})
             metadata = value.get("metadata", {})
             phone_number_id = metadata.get("phone_number_id")
+            # entry.id is the WhatsApp Business Account: where this number's templates live.
+            if phone_number_id and entry.get("id"):
+                waba_tenant = (await db.execute(
+                    select(Tenant).where(Tenant.whatsapp_phone_number_id == phone_number_id))).scalar_one_or_none()
+                if waba_tenant and waba_tenant.wa_business_account_id != entry["id"]:
+                    await template_service.remember_waba(db, waba_tenant, str(entry["id"]))
 
             # WhatsApp voice calls (call_service.py): incoming offers, answers to our calls, hang-ups.
             if (value.get("calls") or change.get("field") == "calls") and phone_number_id:
@@ -3638,59 +3681,6 @@ async def delete_tenant(tenant_id: int, db: AsyncSession = Depends(get_db), admi
 # ---------------------------------------------------------------------------
 # ORDERS DASHBOARD PAGE
 # ---------------------------------------------------------------------------
-
-@app.get("/business-ideas", tags=["Business Ideas"])
-async def get_business_ideas_page():
-    """Serves the Business Idea Generator page."""
-    page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "business_ideas.html")
-    if os.path.exists(page_path):
-        return FileResponse(page_path)
-    return HTMLResponse("<h2>Error: static/business_ideas.html not found</h2>", status_code=404)
-
-
-@app.post("/api/generate-business-ideas", tags=["Business Ideas"])
-async def generate_business_ideas_pdf(
-    file: Optional[UploadFile] = File(None),
-    text: Optional[str] = Form(None),
-    admin: AdminUser = Depends(get_current_admin)
-):
-    """
-    Turn a stock/inventory list (PDF, text file or pasted text) into a business-ideas
-    report, returned as a downloadable PDF.
-    """
-    stock_details = (text or "").strip()
-
-    if file:
-        content = await file.read()
-        filename = (file.filename or "").lower()
-        if filename.endswith(".pdf"):
-            try:
-                stock_details = f"{stock_details}\n{await extract_text_from_pdf(content)}".strip()
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
-        else:
-            try:
-                stock_details = f"{stock_details}\n{content.decode('utf-8')}".strip()
-            except UnicodeDecodeError:
-                raise HTTPException(status_code=400, detail="Uploaded file must be a PDF or a UTF-8 text file.")
-
-    if not stock_details:
-        raise HTTPException(status_code=400, detail="Upload a stock list or type your inventory details first.")
-
-    try:
-        ideas = await generate_business_ideas(stock_details)
-        pdf_bytes = create_pdf_from_text(ideas)
-    except Exception as e:
-        logger.error(f"Business idea generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate the business ideas report.")
-
-    logger.info(f"Business ideas report generated by {admin.username}.")
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="business_ideas_report.pdf"'}
-    )
-
 
 @app.get("/orders", tags=["Order Management"])
 @app.get("/order-dashboard", tags=["Order Management"])
